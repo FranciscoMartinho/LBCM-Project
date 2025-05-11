@@ -1,0 +1,2366 @@
+---
+
+Title: "Projeto LBCM"
+
+---
+# Primeiramente vou filtrar os dados que estão no objeto. Apenas quero ficar com PDAC e Epitélio cells. Como tive um problema com a memória RAM, filtrei primeiro os dados da meta data e counts(pela correlação com os barcodes) e só depois criei o objeto.
+
+```{r}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+
+# Carregar ficheito com counts
+counts.inicial <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\GSE210347_counts.Rds\\GSE210347_counts.Rds")
+
+# Carregar ficheiro com meta data
+meta.data.inicial<-read.table('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\GSE210347_meta.txt\\GSE210347_meta.txt',header=T,sep='\t', dec='.')
+
+# Filtragem dos dados da meta data apenas referentes a tissue 'PDAC' e celltype 'Epithelium'
+Meta_data_Filtrado<-subset(meta.data.inicial, subset = celltype == 'Epithelium' & tissue == 'PDAC')
+
+# Filtragem dos counts pelos barcodes presentes na Meta_data_filtrado
+Counts_filtrado<-counts.inicial[,Meta_data_Filtrado$cellname]
+
+# Criar o objeto seurat
+Objeto_Filtrado <- CreateSeuratObject(counts = Counts_filtrado, meta.data =Meta_data_Filtrado, project = "SeuratObject", min.cells = 3, min.features = 200)
+
+# Guardar o objeto para otimizar o trabalho
+saveRDS(Objeto_Filtrado,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_3grupos\\objeto_filtrado.rds')
+
+```
+
+```{r}
+#Abrir o objeto filtrado (em sessões futuras)
+Objeto_Filtrado <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_3grupos\\objeto_filtrado.rds")
+
+```
+
+# Neste momento, antes de realizar o quality control (QC) tenho 28466 genes (features) e 77094 células.
+
+# Passando então ao QC. Vou começar por criar uma tabela no objeto onde coloco a percentagem de mitocôndrias presente por célula. Lembrando que células em fase de morte apresentam valores elevados de mitocôndrias.
+
+
+```{r}
+
+# Adicionar ao objeto uma tabela com as percentagens de mitocôndrias por célula
+Objeto_Filtrado[["percent.mt"]] <- PercentageFeatureSet(Objeto_Filtrado, pattern = "^MT-")
+
+
+```
+
+# Ainda sobre QC, por uma questão de visualizar os parâmetros nFeature_RNA (o nº de genes), nCount_RNA (o nº de moléculas de RNA) e percent.mt vou gerar um violin Plot. Assim, poderei ter uma melhor noção do estado/qualidade das células.
+
+```{r}
+library(ggplot2)
+#Mudei o Identity (que é a designação de cada grupo que aparecera no plot), de forma a garantir que estão representados os grupos ('Normal','Adjacent' e 'Tumor').
+
+Objeto_Filtrado <- SetIdent(Objeto_Filtrado, value = Objeto_Filtrado@meta.data$group[Objeto_Filtrado@meta.data$group=='Normal'|Objeto_Filtrado@meta.data$group=='Tumor'])
+
+# Gerar o VlnPlot
+VlnPlot(Objeto_Filtrado, 
+                     features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), 
+                     ncol = 3, 
+                     alpha = 0.1)  # Transparência dos pontos
+  
+
+#Valores máximos e mínimos para melhorar perceção
+
+max(Objeto_Filtrado@meta.data$nFeature_RNA) #5999
+min(Objeto_Filtrado@meta.data$nFeature_RNA) #201
+
+max(Objeto_Filtrado@meta.data$nCount_RNA) #80768
+min(Objeto_Filtrado@meta.data$nCount_RNA) #384
+
+max(Objeto_Filtrado@meta.data$percent.mt) #19.99841
+min(Objeto_Filtrado@meta.data$percent.mt) #0
+
+```
+# Olhando para o gráfico percebo que os números presentes em Identity correspondem 1->Normal , 2-> Tumor, 3-> Adjacent
+
+# Depois de analisar os resultados das funções max() e min() percebo que já foi realizada uma filtragem dos dados em que a percent.mt escolhi foi de 20% e nFeature_RNA<6000. Assim não será necessário construir um FeatureScatter. 
+
+# Observo neste gráfico que as células tumorais expressam muitos genes, o que é normal dado estarem desreguladas.
+
+# O próximo passo é normalizar os dados. Utilizarei o método 'LogNormalize' pois divide a expressão em cada célula pela expressão em todas as células, em seguida multiplica por 10000 e aplica o logaritmo no resultado.
+
+# A normalização permite colocar as células em circunstâncias semelhentes (em termos de expressão).
+
+```{r}
+Objeto_Filtrado <- NormalizeData(Objeto_Filtrado, normalization.method = "LogNormalize", scale.factor = 10000)
+
+```
+
+#Interessa-nos identificar os genes cuja expressão mais varia de célula para célula, pois serão vantajosos para retirar conclusões posteriormente ao realizar uma análise isngle-cell. Nomeadamente útil para não estarmos a comparar, por exemplo, house-keeping genes (constitutivamente expressos e expressos por várias células) e focarmo-nos nos que poderão permitir distinguir diversos aspetos em diversas células.
+
+```{r}
+
+#Encontrar 2000 genes que apresentem maior variabilidade
+Objeto_Filtrado <- FindVariableFeatures(Objeto_Filtrado, selection.method = "vst", nfeatures = 2000)
+
+#Ver os 10 genes mais variáveis
+top10_vg <- head(VariableFeatures(Objeto_Filtrado), 10)
+
+#Gerar gráfico com os genes mais variáveis
+plot_genes_variaveis1 <- VariableFeaturePlot(Objeto_Filtrado)
+
+#Gerar gráfico com os genes mais variáveis, tendo os 10 que mais variaram legendados
+plot_genes_variaveis2 <- LabelPoints(plot = plot_genes_variaveis1, points = top10_vg, repel = TRUE)
+
+#Print dos 2 plots
+plot_genes_variaveis1 + plot_genes_variaveis2
+
+```
+
+#Tal como é necessário uniformizar os dados entre as várias células (normalização), também é necessário uniformizar as células quanto à exressão dos seus genes (tumorais expressam muito mais que as outras, p.e), permitindo comparar as mesmas. Ao mesmo tempo também pode ser importante, neste contexto de estudarmos células tumorais, uniformizar as células quanto aos genes mitocôndriais (p.e as mitocôndrias expressam genes necessários à apóptose e por isso células tumorais irão expressar muitos genes destes). Assim é possível uma melhor comparação entre células diferentes.Para isso vou realizar o scaling dos genes duas vezes. 
+
+#No objeto seurat criado, nas colunas estão os barcodes das células e nas linhas os genes.
+
+```{r}
+
+#Scaling dos genes mais variáveis
+Objeto_Filtrado <- ScaleData(Objeto_Filtrado)
+
+#Scaling quanto aos níveis mitocondriais
+Objeto_Filtrado <- ScaleData(Objeto_Filtrado, vars.to.regress='percent.mt')
+
+
+```
+
+ATENÇÃO!
+#Como a memória RAM não permitiu alocar 16,4 Gb ("cannot allocate vector of size 16.4 Gb") fiz scale apenas dos genes em relação aos Variable Features (default), já que é o que nós vamos estudar, e não em relação aos genes todos. 
+
+
+#Agora que já temos os genes mais variávies e as células em condições de serem comparadas, realiza-se um PCA para criar PC's com vários conjuntos de genes variáveis.
+
+```{r}
+#Realizar o PCA
+Objeto_Filtrado <- RunPCA(Objeto_Filtrado, features = VariableFeatures(object = Objeto_Filtrado))
+```
+
+```{r}
+#Visualizar o PC1 e PC2 num gráfico (ilustra o texto anterior)
+
+VizDimLoadings(Objeto_Filtrado, dims = 1:2, reduction = "pca")
+```
+
+#Com os PCs criados e por isso formados grupos de genes variáveis, importa saber quais PC's possuem os genes com maior peso/impacto na variabilidade dos nossos dados, diminuindo assim o universo de genes a analisar e o barulho (dados pouco relevantes). Para isso recorremos a um ElbowPlot.
+
+
+```{r}
+ElbowPlot(Objeto_Filtrado, ndims = 50)
+```
+
+#Decidimos selecionar até ao PC30, dado que os PCs posteriores individulamente já não constituem um peso tão grande na variabilidade do dataset.
+
+#Após isto, recorremos à função FindNeighbors() para encontrarmos células com perfis de expressão (dos genes presentes nos PCs) semelhantes. Depois usamos FindClusters() para agruparmos essas células com perfis de expressão semelhantes em clusters (grupos). 
+
+```{r}
+Objeto_Filtrado<- FindNeighbors(Objeto_Filtrado, dims=1:30)
+
+Objeto_Filtrado <- FindClusters(Objeto_Filtrado, resolution = 0.5)
+```
+#Como o PCA apenas funciona bem quando os PCs em questão constituem a grande maioria da variabilidade, para uma análise de genes presentes em PCs com menor peso nessa variabilidade deverá recorrer-se ao UMAP. Este transforma esses PCs (várias dimensões) num gráfico de apenas 2 dimensões.
+
+```{r}
+
+#Realizar o UMAP
+Objeto_Filtrado <- RunUMAP(Objeto_Filtrado, dims = 1:30) #usando dimensão dos primeiros 30 PC's
+
+```
+
+
+```{r}
+
+#Visualizar o resultado do UMAP
+DimPlot(Objeto_Filtrado, reduction = "umap") #default
+DimPlot(Objeto_Filtrado, reduction = "umap", group.by='orig.ident') #papers
+DimPlot(Objeto_Filtrado, reduction = "umap", group.by='group') #grupos
+
+```
+
+
+```{r}
+# Guardar o objeto para otimizar o trabalho
+saveRDS(Objeto_Filtrado,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_3grupos\\objeto_filtrado_UMAP.rds')
+```
+
+```{r}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+
+#Abrir o objeto filtrado (em sessões futuras)
+Objeto_Filtrado <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_3grupos\\objeto_filtrado_UMAP.rds")
+```
+
+#Após visualizar os Dimplots do UMAP, verificámos que o gráfico dos papers e o dos grupos refletiam algo curioso. Embora no gráfico dos grupos seja possível distinguir os 3 tipos de células, ao observarmos o gráfico dos papers vemos que as células de diferentes papers estão muito afastadas umas das outras. Isto pode refletir pouca semelhança entre células ou diferentes metodologias utilizadas nos vários papers para obter estas células. De forma reduzir essa fonte de variabilidade/diferentes condições entre papers (batch effect) iremos recorrer ao package do Harmony.Este basicamente tem uma função que permite dividir cada cluster de cada paper em subgrupos, de seguida recorre a um fator de correção e forma novos clusters de acordo com a semelhança desses subgrupos. Isto repete-se várias vezes. Após isto serão alguns repetidos dos procedimentos anteriormente realizados.
+
+```{r}
+library(harmony)
+
+# Realiza o Harmony num novo objeto para não influenciar o código anterior (caso queira revê-lo posteriormente, pois o resultado do UMAP irá variar no código posterior )
+
+Objeto_Filtrado_Harmony<-RunHarmony(Objeto_Filtrado, group.by.vars = 'orig.ident', plot_convergence=FALSE)
+
+#Realizar o UMAP e clustering usando os embeddings (outputs) do Harmony em vez do PCA (os PC's)
+ 
+Objeto_Filtrado_Harmony<- Objeto_Filtrado_Harmony %>%
+  RunUMAP(reduction='harmony',dims=1:30)%>%
+  FindNeighbors(reduction='harmony', dims=1:30)%>%
+  FindClusters(resolution=0.5)
+
+#Visualizar o novo UMAP depois de Harmony
+DimPlot(Objeto_Filtrado_Harmony, reduction='umap')
+```
+
+
+```{r}
+# Guardar o objeto para otimizar o trabalho
+saveRDS(Objeto_Filtrado_Harmony,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_3grupos\\objeto_filtrado_UMAP_Harmony_3grupos.rds')
+
+#Abrir o objeto filtrado Harmony (em sessões futuras)
+Objeto_Filtrado_Harmony <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_3grupos\\objeto_filtrado_UMAP_Harmony_3grupos.rds")
+```
+
+```{r}
+library(ggplot2)
+#Gerar a Figura Before and After harmony para o artigo (depois tenho de trocar a legenda dos papers)
+quadrante1<-DimPlot(Objeto_Filtrado, reduction = "umap", group.by='group')
+quadrante1<-quadrante1 + ggtitle('Before Harmony | Groups' )
+quadrante2<-DimPlot(Objeto_Filtrado_Harmony, reduction = "umap", group.by='group')
+quadrante2<-quadrante2 + ggtitle('After Harmony | Groups' )
+quadrante3<-DimPlot(Objeto_Filtrado, reduction = "umap", group.by='orig.ident')
+quadrante3<-quadrante3 + ggtitle('Before Harmony | Papers' )
+quadrante4<-DimPlot(Objeto_Filtrado_Harmony, reduction = "umap", group.by='orig.ident')
+quadrante4<-quadrante4 + ggtitle('After Harmony | Papers' )
+
+quadrante1+quadrante3+quadrante2+quadrante4
+
+
+#este faz o 6 gráficos
+q1<-DimPlot(Objeto_Filtrado, reduction = "umap", group.by='group')
+q1<-q1 + ggtitle('Before Harmony | Groups')
+q2<- DimPlot(Objeto_Filtrado, reduction = "umap", group.by='orig.ident')
+q2<-q2 + ggtitle('Before Harmony | Papers')
+q3<-DimPlot(Objeto_Filtrado_Harmony, reduction = "umap", group.by='group')
+q3<-q3 + ggtitle('After Harmony | Groups')
+q4<-DimPlot(Objeto_Filtrado_Harmony, reduction = "umap", group.by='orig.ident')
+q4<-q4 + ggtitle('After Harmony | Papers')
+q5<-DimPlot(Objeto_Filtrado, reduction='umap')
+q5<-q5 + ggtitle('Before Harmony | Clusters')
+q6<-DimPlot(Objeto_Filtrado_Harmony, reduction='umap')
+q6<-q6 + ggtitle('After Harmony | Clusters')
+
+q1+q2+q5+q3+q4+q6
+
+```
+
+
+#Após visualizarmos os cluster formados num panorama geral, vamos então focar-nos nas células Normais e tentar obter mais informação sobre estas. Para isso, terei de voltar ao objeto filtrado inicial e fazer um subset desse. Depois volto a normalizar e a realizar o código acima até ao UMAP. Realizarei também o processo do Harmony (apesar de não ser necessário, dado que todos os dados de células do Paper 1 são normais) por uma questão de coerência lógica para os futuros grupos de células.
+
+```{r}
+rm(list = ls()) #remove as variáveis guardadas
+
+library(dplyr)
+library(Seurat)
+library(patchwork)
+
+#Abrir o objeto filtrado inical
+Objeto_Filtrado <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_3grupos\\objeto_filtrado.rds")
+
+
+#Criar o subset com apenas células Normais 
+Objeto_Filtrado<-subset(Objeto_Filtrado, subset = group == 'Normal') #28466 genes em 8990 células
+
+#Normalizar
+Objeto_Filtrado <- NormalizeData(Objeto_Filtrado, normalization.method = "LogNormalize", scale.factor = 10000)
+
+#Encontrar 2000 genes que apresentem maior variabilidade
+Objeto_Filtrado <- FindVariableFeatures(Objeto_Filtrado, selection.method = "vst", nfeatures = 2000)
+
+#Fiz o gráfico só por curiosidade:---------------------------------------------------------------
+#Ver os 10 genes mais variáveis
+top10_vg <- head(VariableFeatures(Objeto_Filtrado), 10)
+
+#Gerar gráfico com os genes mais variáveis
+plot_genes_variaveis1 <- VariableFeaturePlot(Objeto_Filtrado)
+
+#Gerar gráfico com os genes mais variáveis, tendo os 10 que mais variaram legendados
+plot_genes_variaveis2 <- LabelPoints(plot = plot_genes_variaveis1, points = top10_vg, repel = TRUE)
+
+#Print dos 2 plots
+plot_genes_variaveis1 + plot_genes_variaveis2
+
+#------------------------------------------------------------------------------------------------
+
+#Scaling dos genes mais variáveis
+Objeto_Filtrado <- ScaleData(Objeto_Filtrado)
+
+#Scaling quanto aos níveis mitocondriais
+Objeto_Filtrado <- ScaleData(Objeto_Filtrado, vars.to.regress='percent.mt')
+  
+#Realizar o PCA
+Objeto_Filtrado <- RunPCA(Objeto_Filtrado, features = VariableFeatures(object = Objeto_Filtrado))  
+
+```
+
+```{r}
+#Construir Elbow Plot com os 50 primeiros PCs
+ElbowPlot(Objeto_Filtrado, ndims = 50) 
+```
+
+
+#Acordámos em escolher os 30 PC's novamente, no entanto no final de realizar o UMAP (após o Harmony), faço com 20 PCs para ver se existirão muitas diferenças.
+
+```{r}
+
+### Para 30 PCs
+Objeto_Filtrado_30PCs<- FindNeighbors(Objeto_Filtrado, dims=1:30)
+
+Objeto_Filtrado_30PCs <- FindClusters(Objeto_Filtrado_30PCs, resolution = 0.5)
+
+#Realizar o UMAP
+Objeto_Filtrado_30PCs <- RunUMAP(Objeto_Filtrado_30PCs,reduction='pca', dims = 1:30) #usando dimensão dos primeiros 30 PC's
+
+#Visualizar o resultado do UMAP
+DimPlot(Objeto_Filtrado_30PCs, reduction = "umap") #default
+DimPlot(Objeto_Filtrado_30PCs, reduction = "umap", group.by='orig.ident') #papers
+DimPlot(Objeto_Filtrado_30PCs, reduction = "umap", group.by='group') #grupos
+
+# Guardar o objeto para otimizar o trabalho
+saveRDS(Objeto_Filtrado_30PCs,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Normalcells\\objeto_filtrado_NormalC_UMAP_30PCs.rds')
+
+library(harmony)
+
+# Realiza o Harmony num novo objeto para não influenciar o código anterior (caso queira revê-lo posteriormente, pois o resultado do UMAP irá variar no código posterior )
+
+Objeto_Filtrado_30PCs_Harmony<-RunHarmony(Objeto_Filtrado_30PCs, group.by.vars = 'orig.ident', plot_convergence=FALSE)
+
+#Realizar o UMAP e clustering usando os embeddings (outputs) do Harmony em vez do PCA (os PC's)
+ 
+Objeto_Filtrado_30PCs_Harmony<- Objeto_Filtrado_30PCs_Harmony %>%
+  RunUMAP(reduction='harmony',dims=1:30)%>%
+  FindNeighbors(reduction='harmony', dims=1:30)%>%
+  FindClusters(resolution=0.5)
+
+#Visualizar o novo UMAP depois de Harmony
+DimPlot(Objeto_Filtrado_30PCs_Harmony, reduction='umap')
+DimPlot(Objeto_Filtrado_30PCs_Harmony, reduction='umap', group.by='orig.ident')
+DimPlot(Objeto_Filtrado_30PCs_Harmony, reduction = "umap", group.by='group')
+
+#Comparar com e sem Harmony em Normal cells
+
+q1<-DimPlot(Objeto_Filtrado_30PCs, reduction = "umap", group.by='group')
+q1<-q1 + ggtitle('Before Harmony | Groups')
+q2<- DimPlot(Objeto_Filtrado_30PCs, reduction = "umap", group.by='orig.ident')
+q2<-q2 + ggtitle('Before Harmony | Papers')
+q3<-DimPlot(Objeto_Filtrado_30PCs_Harmony, reduction = "umap", group.by='group')
+q3<-q3 + ggtitle('After Harmony | Groups')
+q4<-DimPlot(Objeto_Filtrado_30PCs_Harmony, reduction = "umap", group.by='orig.ident')
+q4<-q4 + ggtitle('After Harmony | Papers')
+q5<-DimPlot(Objeto_Filtrado_30PCs, reduction='umap')
+q5<-q5 + ggtitle('Before Harmony | Clusters')
+q6<-DimPlot(Objeto_Filtrado_30PCs_Harmony, reduction='umap')
+q6<-q6 + ggtitle('After Harmony | Clusters')
+
+q1+q2+q5+q3+q4+q6
+  
+# Guardar o objeto para otimizar o trabalho
+saveRDS(Objeto_Filtrado_30PCs_Harmony,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Normalcells\\objeto_filtrado_NormalC_UMAP_30PCs_Harmony.rds')
+
+
+
+### Para os 20PCs
+
+Objeto_Filtrado_20PCs<- FindNeighbors(Objeto_Filtrado, dims=1:20)
+
+Objeto_Filtrado_20PCs <- FindClusters(Objeto_Filtrado_20PCs, resolution = 0.5)
+
+#Realizar o UMAP
+Objeto_Filtrado_20PCs <- RunUMAP(Objeto_Filtrado_20PCs,reduction='pca', dims = 1:20) #usando dimensão dos primeiros 20 PC's
+
+#Visualizar o resultado do UMAP 
+DimPlot(Objeto_Filtrado_20PCs, reduction = "umap") #default
+DimPlot(Objeto_Filtrado_20PCs, reduction = "umap", group.by='orig.ident') #papers
+DimPlot(Objeto_Filtrado_20PCs, reduction = "umap", group.by='group') #grupos
+
+# Guardar o objeto para otimizar o trabalho
+saveRDS(Objeto_Filtrado_20PCs,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Normalcells\\objeto_filtrado_NormalC_UMAP_20PCs.rds')
+
+
+# Realiza o Harmony num novo objeto para não influenciar o código anterior (caso queira revê-lo posteriormente, pois o resultado do UMAP irá variar no código posterior )
+
+Objeto_Filtrado_20PCs_Harmony<-RunHarmony(Objeto_Filtrado_20PCs, group.by.vars = 'orig.ident', plot_convergence=FALSE)
+
+#Realizar o UMAP e clustering usando os embeddings (outputs) do Harmony em vez do PCA (os PC's)
+ 
+Objeto_Filtrado_20PCs_Harmony<- Objeto_Filtrado_20PCs_Harmony %>%
+  RunUMAP(reduction='harmony',dims=1:20)%>%
+  FindNeighbors(reduction='harmony', dims=1:20)%>%
+  FindClusters(resolution=0.5)
+
+#Visualizar o novo UMAP depois de Harmony
+DimPlot(Objeto_Filtrado_20PCs_Harmony, reduction='umap')
+DimPlot(Objeto_Filtrado_20PCs_Harmony, reduction='umap', group.by='orig.ident')
+DimPlot(Objeto_Filtrado_20PCs_Harmony, reduction = "umap", group.by='group')
+
+#Comparar com e sem Harmony em Normal cells
+
+q1<-DimPlot(Objeto_Filtrado_20PCs, reduction = "umap", group.by='group')
+q1<-q1 + ggtitle('Before Harmony | Groups')
+q2<- DimPlot(Objeto_Filtrado_20PCs, reduction = "umap", group.by='orig.ident')
+q2<-q2 + ggtitle('Before Harmony | Papers')
+q3<-DimPlot(Objeto_Filtrado_20PCs_Harmony, reduction = "umap", group.by='group')
+q3<-q3 + ggtitle('After Harmony | Groups')
+q4<-DimPlot(Objeto_Filtrado_20PCs_Harmony, reduction = "umap", group.by='orig.ident')
+q4<-q4 + ggtitle('After Harmony | Papers')
+q5<-DimPlot(Objeto_Filtrado_20PCs, reduction='umap')
+q5<-q5 + ggtitle('Before Harmony | Clusters')
+q6<-DimPlot(Objeto_Filtrado_20PCs_Harmony, reduction='umap')
+q6<-q6 + ggtitle('After Harmony | Clusters')
+
+q1+q2+q5+q3+q4+q6
+
+#Comparar entre 30PC's e 20Pc's (Harmonizados)
+q1<-DimPlot(Objeto_Filtrado_30PCs_Harmony, reduction = "umap", group.by='group')
+q1<-q1 + ggtitle('30PCs after Harmony | Groups')
+q2<- DimPlot(Objeto_Filtrado_30PCs_Harmony, reduction = "umap", group.by='orig.ident')
+q2<-q2 + ggtitle('30PCs after Harmony | Papers')
+q3<-DimPlot(Objeto_Filtrado_20PCs_Harmony, reduction = "umap", group.by='group')
+q3<-q3 + ggtitle('20PCs after Harmony | Groups')
+q4<-DimPlot(Objeto_Filtrado_20PCs_Harmony, reduction = "umap", group.by='orig.ident')
+q4<-q4 + ggtitle('20PCs after Harmony | Papers')
+q5<-DimPlot(Objeto_Filtrado_30PCs_Harmony, reduction='umap')
+q5<-q5 + ggtitle('30Pcs after Harmony | Clusters')
+q6<-DimPlot(Objeto_Filtrado_20PCs_Harmony, reduction='umap')
+q6<-q6 + ggtitle('20Pcs after Harmony | Clusters')
+
+q1+q2+q5+q3+q4+q6
+
+  
+# Guardar o objeto para otimizar o trabalho
+saveRDS(Objeto_Filtrado_20PCs_Harmony,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Normalcells\\objeto_filtrado_NormalC_UMAP_20PCs_Harmony.rds')
+
+```
+
+#Verificámos que a diferença entre 20 PC's e 30 PC's não era muita, então decidimos continuar a uitilizar os 30 Pc's.
+
+```{r}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+
+# Abrir o objeto filtrado 30 PC's Harmony de Células Normais (Otimização de trabalho)
+
+Objeto_Filtrado_30PCs_Harmony <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Normalcells\\objeto_filtrado_NormalC_UMAP_30PCs_Harmony.rds")
+
+```
+
+#Após isto vamos averiguar quais os biomarkers presentes nas células normais. Se um gene for expresso em menos de 20% das células de um cluster, ele será ignorado na comparação, pois pode ser um gene raro ou de baixa relevância para a diferenciação celular, reduzindo o ruído. O default que usámos anteriormente era de 1%
+
+```{r}
+#Encontra marcadores (negativos e positivos) para todos os clusters, comparando com todas as células presentes
+normalcells.markers <- FindAllMarkers(Objeto_Filtrado_30PCs_Harmony,min.pct = 0.2) # Para os 7 clusters
+```
+
+# Obtive uma tabela com os vários biomarcadores e agora vou fazer várias tabelas (cerca de 36, acho) em que vou comparar cada cluster meu ('normalcells.markers') com cada uma das 5 populações que o Fred me forneceu. Para cada cluster meu existirá uma tabela com os biomarcadores por população. No final existirão 2 tabelas com os somatórios de logs (+ e -) por população
+#Log2FC + e - significa presença ou ausência de expressão do gene, em relação aos genes noutros clusters. Pois lá está um gene pode existir noutras células de outros clusters. O que no final me permitirá distinguir diferentes células será não só a presença de determinados genes de biomarcadores mas também a existência de expressão desses genes (os log2FC + e -). Log2FC maiores significam maior expressão de um dado gene num cluster em relação a esse mesmo gene noutros clusters.
+
+# O objetivo é comparar células de humanos (destes papers) com as de ratinhos e ver se existe uma correlação. Para intermediário comparo com o gene proporcional em humanos (gene 2) dos documentos de cada população.
+
+```{r}
+#Abrir ficheiros de cada população
+
+ifn_data<-read.table('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\biomarcadores\\ifn.txt', header=T, sep='\t', dec=',')
+
+acinar_data<-read.table('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\biomarcadores\\acinar.txt', header=T, sep='\t', dec=',')
+
+emt_data<-read.table('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\biomarcadores\\emt.txt', header=T, sep='\t', dec=',')
+
+stem_data<-read.table('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\biomarcadores\\stem.txt', header=T, sep='\t', dec=',')
+
+###criar tabelas para cada cluster  com os genes comuns a cada população e os respetivos logFC 
+populacoes<-list('acinar'=acinar_data,'emt'=emt_data,'ifn'=ifn_data, 'stem'=stem_data) #lista com cada tabela para melhor acesso
+tb_count_clusters_pop_dr<-tb_count_clusters_pop_ur<-matrix(data=0,nrow=7,ncol=4,dimnames = list(paste('cluster_',0:6,sep=''),names(populacoes))) #cria matriz vazia com as medidas exatas
+
+for (n in 1:7){
+  tb_cluster<-normalcells.markers[normalcells.markers$cluster==(n-1),]#toda a info de cada cluster
+  tb_cluster <- tb_cluster %>% ((avg_log2FC > 1 | avg_log2FC < -1) & p_val_adj < 0.05) # Filtrar logFC e p val, só psrs o que realmente pontuam muito
+  down_reg_cluster<-c() #lista com quantos -1 de cada população existem em cada cluster
+  up_reg_cluster<-c() #lista com quantos 1 de cada população existem em cada cluster
+  
+  for(z in 1:4){
+    common_genes<-intersect(tb_cluster$gene,populacoes[[z]]$gene.2)#genes em comum no cluster com cada população
+    log2FC_cluster<-tb_cluster$avg_log2FC[match(common_genes,tb_cluster$gene)] #devolve o log2FC correspondente aos common_genes e normalcells.markers$gene
+    log2FC_pop<-populacoes[[z]]$avg_logFC[match(common_genes,populacoes[[z]]$gene.2)] #devolve o log2FC correspondente aos common_genes e o gene comum na população
+    log2FC_consist_temp<-sign(cbind(log2FC_cluster,log2FC_pop)) #cria uma matriz conforme o sinal do log2FC, atirbuindo 1 a sinal positivo e -1 a sinal negativo
+    log2FC_consist<-c()
+    #o for abaixo permite percorrer a matriz acima criada e adicionar à lista acima -1,1 ou 0 conforme o sinal dos logs da população e do cluster correspondam ou não.
+    for(i in 1:nrow(log2FC_consist_temp)){
+      if(log2FC_consist_temp[i,'log2FC_cluster']==log2FC_consist_temp[i,'log2FC_pop'] & log2FC_consist_temp[i,'log2FC_cluster']==1){
+        log2FC_consist<-c(log2FC_consist,1)
+      }else if(log2FC_consist_temp[i,'log2FC_cluster']==log2FC_consist_temp[i,'log2FC_pop'] & log2FC_consist_temp[i,'log2FC_cluster']==(-1)){
+        log2FC_consist<-c(log2FC_consist,-1)
+      }else{
+        log2FC_consist<-c(log2FC_consist,0)
+      }
+    }
+    Counts_Pop_logconsist_temp<-table(c(log2FC_consist,c(-1,0,1))) #conta o total de -1,0 e 1 por população e cluster (pois está dentro dos ciclos for)
+    down_reg_cluster<-append(down_reg_cluster,Counts_Pop_logconsist_temp[1]) #permite adicionar à lista do total -1's do cluster
+    up_reg_cluster<-append(up_reg_cluster,Counts_Pop_logconsist_temp[3]) #permite adicionar à lista do total 1's do cluster
+    temp_table_pop<-data_frame(log2FC_cluster,log2FC_pop,log2FC_consist)#cria tabela temporária
+    rownames(temp_table_pop)<-common_genes #cada linha é legendada por um gene
+    Nomefinal_tab <- paste('Pop_',names(populacoes[z]),'_cluster', n-1, sep="") #novo nome para cada tabela
+    assign(Nomefinal_tab, temp_table_pop) #dá o novo nome acima à tabela antiga
+  }
+  tb_count_clusters_pop_ur[n,]<-up_reg_cluster #adiciona os dados linha a linha à matriz up regulated
+  tb_count_clusters_pop_dr[n,]<-down_reg_cluster #adiciona os dados linha a linha à matriz down regulated
+} 
+
+print(tb_count_clusters_pop_dr-1)#matriz com os counts down regulated de cada população por cluster
+print(tb_count_clusters_pop_ur-1)#matriz com os counts up regulated de cada população por cluster
+
+```
+
+```{r}
+#Se preferir trabalhar em tabelas:
+tb_count_clusters_pop_dr<-data.frame(tb_count_clusters_pop_dr)
+tb_count_clusters_pop_ur<-data.frame(tb_count_clusters_pop_ur)
+```
+
+
+
+#Depois de obter os marcadores diferencialmente expressos em cada cluster comuns a cada população de ratinhos, reside o problema de não serem únicos de cada população. Isto poderá ser problemático pois células do pâncreas de diferentes populações poderão ser muito parecidas entre si, apresentando vários marcadores em comum o que dificulta a distinção de células diferentes. Lembrando que neste caso, não é preto no branco, ou seja, não é conhecido um conjunto de marcadores single cell para distinguir cada célula de acordo com os níveis de expressão, apenas um conjunto de marcadores que permite distinguir a população. Assim sendo, filtrar apenas o genes únicos(sem repetições) entre populações poderá permitir uma melhorar distinção entre populações.
+
+
+```{r}
+#Por uma questão de otimizar o meu raciocínio futuro vou colocar aqui o código que correria novamente para obter o resultado pretendido
+
+rm(list = ls()) #remove as variáveis guardadas
+
+library(dplyr)
+library(Seurat)
+library(patchwork)
+
+# Abrir o objeto filtrado 30 PC's Harmony de Células Normais
+Objeto_Filtrado_30PCs_Harmony <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Normalcells\\objeto_filtrado_NormalC_UMAP_30PCs_Harmony.rds")
+
+
+#Carregar dados das populações de ratinhos
+
+ifn_data<-read.table('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\biomarcadores\\ifn.txt', header=T, sep='\t', dec=',')
+
+acinar_data<-read.table('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\biomarcadores\\acinar.txt', header=T, sep='\t', dec=',')
+
+emt_data<-read.table('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\biomarcadores\\emt.txt', header=T, sep='\t', dec=',')
+
+stem_data<-read.table('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\biomarcadores\\stem.txt', header=T, sep='\t', dec=',')
+
+#Encontra marcadores (negativos e positivos) para todos os clusters, comparando com todas as células presentes
+normalcells.markers<-FindAllMarkers(Objeto_Filtrado_30PCs_Harmony, min.pct = 0.2) # Para os 7 clusters
+
+###criar tabelas para cada cluster  com os genes únicos comuns a cada população e os respetivos logFC 
+populacoes<-list('acinar_pop'=acinar_data,'emt_pop'=emt_data,'ifn_pop'=ifn_data, 'stem_pop'=stem_data) #lista com cada tabela para melhor acesso
+
+todos.genes.pop<-c(acinar_data$gene.2,emt_data$gene.2,ifn_data$gene.2,stem_data$gene.2) #lista com todos os genes das populações
+contar.genes.pop<-table(todos.genes.pop) #frequência de cada gene nas 5 populações
+genes.duplicados.pop<-names(contar.genes.pop[contar.genes.pop>1]) #lista com todos os genes que não são únicos nas 5 populações
+
+filter_unique_genes<-function(tabela){
+  tabela[!tabela$gene.2 %in% genes.duplicados.pop, ,drop= FALSE]
+} #função que remove as linhas correspondentes aos genes duplicados. no fundo fica uma tabela com apenas os que não pertencem ao genes.duplicados
+
+```
+#Fomos fazendo algumas aleterações no código de Normal cells unique genes e temos dois procedimentos de filtragem e por isso dois códigos em caixinhas diferentes.
+```{r}
+#OPÇÃO 1 de continuação do código anterior
+
+#ter o filtro  nos clusters
+
+# Preprocess each population to filter unique genes
+for (p in 1:4) {
+  populacoes[[p]] <- filter_unique_genes(populacoes[[p]])
+}
+
+# Create empty matrices for up/down-regulated counts
+tb_count_clusters_pop_dr <- tb_count_clusters_pop_ur <- matrix(
+  data = 0, nrow = 7, ncol = 4,
+  dimnames = list(paste('cluster_', 0:6, sep = ''), names(populacoes))
+)
+
+# Loop through clusters
+for (n in 1:7) {
+  tb_cluster <- normalcells.markers[normalcells.markers$cluster == (n - 1), ]
+  tb_cluster <- tb_cluster %>% filter(avg_log2FC > 1 | avg_log2FC < -1 | p_val_adj < 0.05) #filtro menos restrito que o do &
+  
+  down_reg_cluster <- numeric(4)  # Initialize zero-filled vectors
+  up_reg_cluster <- numeric(4)
+
+  # Loop through populations
+  for (z in 1:4) {
+    common_genes <- intersect(tb_cluster$gene, populacoes[[z]]$gene.2)  # Find common genes
+
+    if (length(common_genes) == 0) {
+      # No common genes → set empty vectors
+      log2FC_cluster <- numeric(0)
+      log2FC_pop <- numeric(0)
+      log2FC_consist <- integer(0)
+    } else {
+      log2FC_cluster <- tb_cluster$avg_log2FC[match(common_genes, tb_cluster$gene)]
+      log2FC_pop <- populacoes[[z]]$avg_logFC[match(common_genes, populacoes[[z]]$gene.2)]
+      log2FC_consist_temp <- sign(cbind(log2FC_cluster, log2FC_pop))
+
+      # Determine consistency (-1, 0, or 1)
+      log2FC_consist <- apply(log2FC_consist_temp, 1, function(x) {
+        if (x[1] == x[2]) return(x[1]) else return(0)
+      })
+    }
+
+    # Count occurrences of -1, 0, and 1 explicitly
+    Counts_Pop_logconsist_temp <- table(factor(log2FC_consist, levels = c(-1, 0, 1)))
+
+    down_reg_cluster[z] <- Counts_Pop_logconsist_temp["-1"]  # -1 count
+    up_reg_cluster[z] <- Counts_Pop_logconsist_temp["1"]     # 1 count
+
+    # Create a temporary table with results
+    temp_table_pop <- data.frame(log2FC_cluster, log2FC_pop, log2FC_consist, row.names = common_genes)
+
+    # Name and assign the table dynamically
+    Nomefinal_tab <- paste0('Pop_', names(populacoes)[z], '_cluster', n - 1)
+    assign(Nomefinal_tab, temp_table_pop)
+  }
+
+  # Store results in matrices
+  tb_count_clusters_pop_ur[n, ] <- up_reg_cluster
+  tb_count_clusters_pop_dr[n, ] <- down_reg_cluster
+}
+
+# Print results WITHOUT needing to subtract 1 (fix applied)
+print(tb_count_clusters_pop_dr)
+print(tb_count_clusters_pop_ur)
+
+
+#Se preferir trabalhar em tabelas:
+tb_count_clusters_pop_dr<-data.frame(tb_count_clusters_pop_dr)
+tb_count_clusters_pop_ur<-data.frame(tb_count_clusters_pop_ur)
+
+
+```
+
+
+```{r}
+# Guardar a tabela dos counts dos Markers Normal Unique Filtrados logFC e p_value nos clusters (ou seja filtrados 1 vez)
+#UP regulated
+write.csv(tb_count_clusters_pop_ur,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Tabelas dos Counts R\\Unique genes\\Tabelas dos Counts Normal Cells\\Markers_Normal_Unique_UR_Filtro_1vez.csv')
+
+#Down regulated
+write.csv(tb_count_clusters_pop_dr,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Tabelas dos Counts R\\Unique genes\\Tabelas dos Counts Normal Cells\\Markers_Normal_Unique_DR_Filtro_1vez.csv')
+
+```
+
+
+
+```{r}
+#OPÇÃO 2 de continuação do código anterior
+
+#ter o filtro na população e nos clusters
+
+# Preprocess each population to filter unique genes
+for (p in 1:4) {
+  populacoes[[p]] <- filter_unique_genes(populacoes[[p]]) %>% filter((avg_logFC > 1 | avg_logFC < -1) & p_val_adj < 0.05)
+}
+
+# Create empty matrices for up/down-regulated counts
+tb_count_clusters_pop_dr <- tb_count_clusters_pop_ur <- matrix(
+  data = 0, nrow = 7, ncol = 4,
+  dimnames = list(paste('cluster_', 0:6, sep = ''), names(populacoes))
+)
+
+# Loop through clusters
+for (n in 1:7) {
+  tb_cluster <- normalcells.markers[normalcells.markers$cluster == (n - 1), ]
+  tb_cluster <- tb_cluster %>% filter((avg_log2FC > 1 | avg_log2FC < -1) & p_val_adj < 0.05)
+  
+  down_reg_cluster <- numeric(4)  # Initialize zero-filled vectors
+  up_reg_cluster <- numeric(4)
+
+  # Loop through populations
+  for (z in 1:4) {
+    common_genes <- intersect(tb_cluster$gene, populacoes[[z]]$gene.2)  # Find common genes
+
+    if (length(common_genes) == 0) {
+      # No common genes → set empty vectors
+      log2FC_cluster <- numeric(0)
+      log2FC_pop <- numeric(0)
+      log2FC_consist <- integer(0)
+    } else {
+      log2FC_cluster <- tb_cluster$avg_log2FC[match(common_genes, tb_cluster$gene)]
+      log2FC_pop <- populacoes[[z]]$avg_logFC[match(common_genes, populacoes[[z]]$gene.2)]
+      log2FC_consist_temp <- sign(cbind(log2FC_cluster, log2FC_pop))
+
+      # Determine consistency (-1, 0, or 1)
+      log2FC_consist <- apply(log2FC_consist_temp, 1, function(x) {
+        if (x[1] == x[2]) return(x[1]) else return(0)
+      })
+    }
+
+    # Count occurrences of -1, 0, and 1 explicitly
+    Counts_Pop_logconsist_temp <- table(factor(log2FC_consist, levels = c(-1, 0, 1)))
+
+    down_reg_cluster[z] <- Counts_Pop_logconsist_temp["-1"]  # -1 count
+    up_reg_cluster[z] <- Counts_Pop_logconsist_temp["1"]     # 1 count
+
+    # Create a temporary table with results
+    temp_table_pop <- data.frame(log2FC_cluster, log2FC_pop, log2FC_consist, row.names = common_genes)
+
+    # Name and assign the table dynamically
+    Nomefinal_tab <- paste0('Pop_', names(populacoes)[z], '_cluster', n - 1)
+    assign(Nomefinal_tab, temp_table_pop)
+  }
+
+  # Store results in matrices
+  tb_count_clusters_pop_ur[n, ] <- up_reg_cluster
+  tb_count_clusters_pop_dr[n, ] <- down_reg_cluster
+}
+
+# Print results WITHOUT needing to subtract 1 (fix applied)
+print(tb_count_clusters_pop_dr)
+print(tb_count_clusters_pop_ur)
+
+```
+```{r}
+# Guardar a tabela dos counts dos Markers Normal Unique Filtrados logFC e p_value nos clusters e populações (ou seja filtrados 2 vezes)
+#UP regulated
+write.csv(tb_count_clusters_pop_ur,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Tabelas dos Counts R\\Unique genes\\Tabelas dos Counts Normal Cells\\Markers_Normal_Unique_UR_Filtro_BEM2vezes.csv')
+
+#Down regulated
+write.csv(tb_count_clusters_pop_dr,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Tabelas dos Counts R\\Unique genes\\Tabelas dos Counts Normal Cells\\Markers_Normal_Unique_DR_Filtro_BEM2vezes.csv')
+```
+
+
+```{r}
+#Guardar normalcells.markers (isto foi para o default):
+saveRDS(normalcells.markers,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Normalcells\\normalcells_markers.rds')
+
+#Guardar normalcells.markers(com Find.Markers=0.2):
+saveRDS(normalcells.markers,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Normalcells\\normalcells_markers_0.2.rds')
+
+```
+
+
+```{r}
+#Se preferir trabalhar em tabelas:
+tb_count_clusters_pop_dr<-data.frame(tb_count_clusters_pop_dr)
+tb_count_clusters_pop_ur<-data.frame(tb_count_clusters_pop_ur)
+```
+
+#Após observar os genes únicos comuns aos genes humanos dos nossos papers e aos ratinhos de cada população e os Log2FC's + e - . Vou aplicar o mesmo processo mas para as células tumorais.Ou seja, terei de voltar ao objeto filtrado inicial e fazer um subset desse. Depois volto a normalizar e a realizar o código acima até ao UMAP. Realizarei também o processo do Harmony. 
+
+
+```{r}
+
+rm(list = ls()) #remove as variáveis guardadas
+
+library(dplyr)
+library(Seurat)
+library(patchwork)
+
+#Abrir o objeto filtrado inical
+Objeto_Filtrado <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_3grupos\\objeto_filtrado.rds")
+
+
+#Criar o subset com apenas células tumorais
+Objeto_Filtrado<-subset(Objeto_Filtrado, subset = group == 'Tumor') #28466 genes em 36424 células
+
+#Normalizar
+Objeto_Filtrado <- NormalizeData(Objeto_Filtrado, normalization.method = "LogNormalize", scale.factor = 10000)
+
+#Encontrar 2000 genes que apresentem maior variabilidade
+Objeto_Filtrado <- FindVariableFeatures(Objeto_Filtrado, selection.method = "vst", nfeatures = 2000)
+
+#Fiz o gráfico só por curiosidade:---------------------------------------------------------------
+#Ver os 10 genes mais variáveis
+top10_vg <- head(VariableFeatures(Objeto_Filtrado), 10)
+
+#Gerar gráfico com os genes mais variáveis
+plot_genes_variaveis1 <- VariableFeaturePlot(Objeto_Filtrado)
+
+#Gerar gráfico com os genes mais variáveis, tendo os 10 que mais variaram legendados
+plot_genes_variaveis2 <- LabelPoints(plot = plot_genes_variaveis1, points = top10_vg, repel = TRUE)
+
+#Print dos 2 plots
+plot_genes_variaveis1 + plot_genes_variaveis2
+
+#------------------------------------------------------------------------------------------------
+
+#Scaling dos genes mais variáveis
+Objeto_Filtrado <- ScaleData(Objeto_Filtrado)
+
+#Scaling quanto aos níveis mitocondriais
+Objeto_Filtrado <- ScaleData(Objeto_Filtrado, vars.to.regress='percent.mt')
+  
+#Realizar o PCA
+Objeto_Filtrado <- RunPCA(Objeto_Filtrado, features = VariableFeatures(object = Objeto_Filtrado)) 
+#Construção do Elbow plot
+ElbowPlot(Objeto_Filtrado, ndims = 50) 
+
+### Para 30 PCs
+Objeto_Filtrado_30PCs<- FindNeighbors(Objeto_Filtrado, dims=1:30)
+
+Objeto_Filtrado_30PCs <- FindClusters(Objeto_Filtrado_30PCs, resolution = 0.5)
+
+#Realizar o UMAP
+Objeto_Filtrado_30PCs <- RunUMAP(Objeto_Filtrado_30PCs,reduction='pca', dims = 1:30) #usando dimensão dos primeiros 30 PC's
+
+# Guardar o objeto para otimizar o trabalho
+saveRDS(Objeto_Filtrado_30PCs,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Tumorcells\\objeto_filtrado_TumorC_UMAP_30PCs.rds')
+
+#Abrir o objeto filtrado inical
+Objeto_Filtrado_30PCs <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Tumorcells\\objeto_filtrado_TumorC_UMAP_30PCs.rds")
+
+library(harmony)
+
+# Realiza o Harmony num novo objeto para não influenciar o código anterior (caso queira revê-lo posteriormente, pois o resultado do UMAP irá variar no código posterior )
+
+Objeto_Filtrado_30PCs_Harmony<-RunHarmony(Objeto_Filtrado_30PCs, group.by.vars = 'orig.ident', plot_convergence=FALSE)
+
+#Realizar o UMAP e clustering usando os embeddings (outputs) do Harmony em vez do PCA (os PC's)
+ 
+Objeto_Filtrado_30PCs_Harmony<- Objeto_Filtrado_30PCs_Harmony %>%
+  RunUMAP(reduction='harmony',dims=1:30)%>%
+  FindNeighbors(reduction='harmony', dims=1:30)%>%
+  FindClusters(resolution=0.5)
+
+library(ggplot2)
+#Comparar com e sem Harmony em Tumor cells
+
+q1<-DimPlot(Objeto_Filtrado_30PCs, reduction = "umap", group.by='group')
+q1<-q1 + ggtitle('Before Harmony | Groups')
+q2<- DimPlot(Objeto_Filtrado_30PCs, reduction = "umap", group.by='orig.ident')
+q2<-q2 + ggtitle('Before Harmony | Papers')
+q3<-DimPlot(Objeto_Filtrado_30PCs_Harmony, reduction = "umap", group.by='group')
+q3<-q3 + ggtitle('After Harmony | Groups')
+q4<-DimPlot(Objeto_Filtrado_30PCs_Harmony, reduction = "umap", group.by='orig.ident')
+q4<-q4 + ggtitle('After Harmony | Papers')
+q5<-DimPlot(Objeto_Filtrado_30PCs, reduction='umap')
+q5<-q5 + ggtitle('Before Harmony | Clusters')
+q6<-DimPlot(Objeto_Filtrado_30PCs_Harmony, reduction='umap')
+q6<-q6 + ggtitle('After Harmony | Clusters')
+
+q1+q2+q5+q3+q4+q6
+  
+# Guardar o objeto para otimizar o trabalho
+saveRDS(Objeto_Filtrado_30PCs_Harmony,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Tumorcells\\objeto_filtrado_TumorC_UMAP_30PCs_Harmony.rds')
+
+
+```
+
+#Já tendo o objeto com tumor cells filtrado, processado e harmonizado vou agora ver os marcadores presentes nestas células.
+
+```{r}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+
+# Abrir o objeto filtrado 30 PC's Harmony de Células Tumorais (Otimização de trabalho)
+
+Objeto_Filtrado_30PCs_Harmony <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Tumorcells\\objeto_filtrado_TumorC_UMAP_30PCs_Harmony.rds")
+
+#Encontra marcadores (negativos e positivos) para todos os clusters, comparando com todas as células presentes
+Tummorcells.markers <- FindAllMarkers(Objeto_Filtrado_30PCs_Harmony, min.pct = 0.2) # Para os 28 clusters
+
+# Guardar o Tummorcells.markers para otimizar o trabalho
+saveRDS(Tummorcells.markers,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Tumorcells\\tumorcells_markers_0.2.rds')
+
+
+```
+
+
+```{r}
+# Abrir o Tumorcells.markers (Otimização de trabalho)
+
+Tumorcells.markers <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Tumorcells\\tumorcells_markers_0.2.rds")
+
+#Abrir ficheiros de cada população
+
+ifn_data<-read.table('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\biomarcadores\\ifn.txt', header=T, sep='\t', dec=',')
+
+acinar_data<-read.table('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\biomarcadores\\acinar.txt', header=T, sep='\t', dec=',')
+
+cxcl_data<-read.table('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\biomarcadores\\cxcl.txt', header=T, sep='\t', dec=',')
+
+emt_data<-read.table('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\biomarcadores\\emt.txt', header=T, sep='\t', dec=',')
+
+stem_data<-read.table('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\biomarcadores\\stem.txt', header=T, sep='\t', dec=',')
+
+
+#Ver o genes em comum de celulas tumorais entre as populações de ratinhos e humanos de forma geral(sem ser os genes únicos):
+
+###criar tabelas para cada cluster  com os genes comuns a cada população e os respetivos logFC 
+populacoes<-list('acinar'=acinar_data,'emt_pop'=emt_data,'ifn_pop'=ifn_data, 'stem_pop'=stem_data) #lista com cada tabela para melhor acesso
+tb_count_clusters_pop_dr<-tb_count_clusters_pop_ur<-matrix(data=0,nrow=29,ncol=4,dimnames = list(paste('cluster_',0:28,sep=''),names(populacoes))) #cria matriz vazia com as medidas exatas
+
+for (n in 1:length(unique(Tumorcells.markers$cluster))){
+  tb_cluster<-Tumorcells.markers[Tumorcells.markers$cluster==(n-1),]#toda a info de cada cluster
+  down_reg_cluster<-c() #lista com quantos -1 de cada população existem em cada cluster
+  up_reg_cluster<-c() #lista com quantos 1 de cada população existem em cada cluster
+  
+  for(z in 1:4){
+    common_genes<-intersect(tb_cluster$gene,populacoes[[z]]$gene.2)#genes em comum no cluster com cada população
+    log2FC_cluster<-tb_cluster$avg_log2FC[match(common_genes,tb_cluster$gene)] #devolve o log2FC correspondente aos common_genes e Tumorcells.markers$gene
+    log2FC_pop<-populacoes[[z]]$avg_logFC[match(common_genes,populacoes[[z]]$gene.2)] #devolve o log2FC correspondente aos common_genes e o gene comum na população
+    log2FC_consist_temp<-sign(cbind(log2FC_cluster,log2FC_pop)) #cria uma matriz conforme o sinal do log2FC, atirbuindo 1 a sinal positivo e -1 a sinal negativo
+    log2FC_consist<-c()
+    #o for abaixo permite percorrer a matriz acima criada e adicionar à lista acima -1,1 ou 0 conforme o sinal dos logs da população e do cluster correspondam ou não.
+    for(i in 1:nrow(log2FC_consist_temp)){
+      if(log2FC_consist_temp[i,'log2FC_cluster']==log2FC_consist_temp[i,'log2FC_pop'] & log2FC_consist_temp[i,'log2FC_cluster']==1){
+        log2FC_consist<-c(log2FC_consist,1)
+      }else if(log2FC_consist_temp[i,'log2FC_cluster']==log2FC_consist_temp[i,'log2FC_pop'] & log2FC_consist_temp[i,'log2FC_cluster']==(-1)){
+        log2FC_consist<-c(log2FC_consist,-1)
+      }else{
+        log2FC_consist<-c(log2FC_consist,0)
+      }
+    }
+    Counts_Pop_logconsist_temp<-table(log2FC_consist) #conta o total de -1,0 e 1 por população e cluster (pois está dentro dos ciclos for)
+    down_reg_cluster<-append(down_reg_cluster,Counts_Pop_logconsist_temp[1]) #permite adicionar à lista do total -1's do cluster
+    up_reg_cluster<-append(up_reg_cluster,Counts_Pop_logconsist_temp[3]) #permite adicionar à lista do total 1's do cluster
+    temp_table_pop<-data_frame(log2FC_cluster,log2FC_pop,log2FC_consist)#cria tabela temporária
+    rownames(temp_table_pop)<-common_genes #cada linha é legendada por um gene
+    Nomefinal_tab <- paste('Pop_',names(populacoes[z]),'_cluster', n-1, sep="") #novo nome para cada tabela
+    assign(Nomefinal_tab, temp_table_pop) #dá o novo nome acima à tabela antiga
+  }
+  tb_count_clusters_pop_ur[n,]<-up_reg_cluster #adiciona os dados linha a linha à matriz up regulated
+  tb_count_clusters_pop_dr[n,]<-down_reg_cluster #adiciona os dados linha a linha à matriz down regulated
+} 
+
+print(tb_count_clusters_pop_dr)#matriz com os counts down regulated de cada população por c.luster
+print(tb_count_clusters_pop_ur)#matriz com os counts up regulated de cada população por cluster
+
+#Se preferir trabalhar em tabelas:
+tb_count_clusters_pop_dr<-data.frame(tb_count_clusters_pop_dr)
+tb_count_clusters_pop_ur<-data.frame(tb_count_clusters_pop_ur)
+
+```
+
+
+#Fomos fazendo algumas aleterações no código de Tumor cells unique genes e temos dois procedimentos de filtragem e por isso dois códigos em caixinhas diferentes.
+
+
+
+```{r}
+#Ver o genes ÚNICOS de células tumorais em comum entre as populações de ratinhos e humanos de forma geral:
+
+rm(list = ls()) #remove as variáveis guardadas
+
+library(dplyr)
+library(Seurat)
+library(patchwork)
+
+# Abrir o Tumorcells.markes
+Tumorcells.markers <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Tumorcells\\tumorcells_markers_0.2.rds")
+
+
+#Carregar dados das populações de ratinhos
+
+ifn_data<-read.table('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\biomarcadores\\ifn.txt', header=T, sep='\t', dec=',')
+
+acinar_data<-read.table('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\biomarcadores\\acinar.txt', header=T, sep='\t', dec=',')
+
+emt_data<-read.table('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\biomarcadores\\emt.txt', header=T, sep='\t', dec=',')
+
+stem_data<-read.table('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\biomarcadores\\stem.txt', header=T, sep='\t', dec=',')
+
+###criar tabelas para cada cluster  com os genes únicos comuns a cada população e os respetivos logFC 
+populacoes<-list('acinar'=acinar_data,'emt'=emt_data,'ifn'=ifn_data, 'stem'=stem_data) #lista com cada tabela para melhor acesso
+
+todos.genes.pop<-c(acinar_data$gene.2,emt_data$gene.2,ifn_data$gene.2,stem_data$gene.2) #lista com todos os genes das populações
+contar.genes.pop<-table(todos.genes.pop) #frequência de cada gene nas 5 populações
+genes.duplicados.pop<-names(contar.genes.pop[contar.genes.pop>1]) #lista com todos os genes que não são únicos nas 5 populações
+
+filter_unique_genes<-function(tabela){
+  tabela[!tabela$gene.2 %in% genes.duplicados.pop, ,drop= FALSE]
+}
+
+```
+
+
+```{r}
+#OPÇÃO 1 de continuação do código anterior
+
+#ter o filtro  clusters
+# Preprocess each population to filter unique genes
+for (p in 1:4) {
+  populacoes[[p]] <- filter_unique_genes(populacoes[[p]]) 
+}
+
+# Create empty matrices for up/down-regulated counts
+tb_count_clusters_pop_dr <- tb_count_clusters_pop_ur <- matrix(
+  data = 0, nrow = 29, ncol = 4,
+  dimnames = list(paste('cluster_', 0:28, sep = ''), names(populacoes))
+)
+
+# Loop through clusters
+for (n in 1:29) {
+  tb_cluster <- Tumorcells.markers[Tumorcells.markers$cluster == (n - 1), ]
+  tb_cluster <- tb_cluster %>% filter(avg_log2FC > 1 | avg_log2FC < -1 | p_val_adj < 0.05) #este filtro é mais vasto (se bem que não é o ideal mas senão for este fico sem genes ahahaha)
+
+  down_reg_cluster <- numeric(4)  # Initialize zero-filled vectors
+  up_reg_cluster <- numeric(4)
+
+  # Loop through populations
+  for (z in 1:4) {
+    common_genes <- intersect(tb_cluster$gene, populacoes[[z]]$gene.2)  # Find common genes
+
+    if (length(common_genes) == 0) {
+      # No common genes → set empty vectors
+      log2FC_cluster <- numeric(0)
+      log2FC_pop <- numeric(0)
+      log2FC_consist <- integer(0)
+    } else {
+      log2FC_cluster <- tb_cluster$avg_log2FC[match(common_genes, tb_cluster$gene)]
+      log2FC_pop <- populacoes[[z]]$avg_logFC[match(common_genes, populacoes[[z]]$gene.2)]
+      log2FC_consist_temp <- sign(cbind(log2FC_cluster, log2FC_pop))
+
+      # Determine consistency (-1, 0, or 1)
+      log2FC_consist <- apply(log2FC_consist_temp, 1, function(x) {
+        if (x[1] == x[2]) return(x[1]) else return(0)
+      })
+    }
+
+    # Count occurrences of -1, 0, and 1 explicitly
+    Counts_Pop_logconsist_temp <- table(factor(log2FC_consist, levels = c(-1, 0, 1)))
+
+    down_reg_cluster[z] <- Counts_Pop_logconsist_temp["-1"]  # -1 count
+    up_reg_cluster[z] <- Counts_Pop_logconsist_temp["1"]     # 1 count
+
+    # Create a temporary table with results
+    temp_table_pop <- data.frame(log2FC_cluster, log2FC_pop, log2FC_consist, row.names = common_genes)
+
+    # Name and assign the table dynamically
+    Nomefinal_tab <- paste0('Pop_', names(populacoes)[z], '_cluster', n - 1)
+    assign(Nomefinal_tab, temp_table_pop)
+  }
+
+  # Store results in matrices
+  tb_count_clusters_pop_ur[n, ] <- up_reg_cluster
+  tb_count_clusters_pop_dr[n, ] <- down_reg_cluster
+}
+
+# Print results WITHOUT needing to subtract 1 (fix applied)
+print(tb_count_clusters_pop_dr)
+print(tb_count_clusters_pop_ur)
+```
+
+```{r}
+# Guardar a tabela dos counts dos Markers Tumor Unique Filtrados logFC e p_value nos clusters (ou seja filtrados 1 vez)
+#UP regulated
+write.csv(tb_count_clusters_pop_ur,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Tabelas dos Counts R\\Unique genes\\Tabelas dos Counts Tumor Cells\\Markers_Tumor_Unique_UR_Filtro_1vez.csv')
+
+#Down regulated
+write.csv(tb_count_clusters_pop_dr,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Tabelas dos Counts R\\Unique genes\\Tabelas dos Counts Tumor Cells\\Markers_Tumor_Unique_DR_Filtro_1vez.csv')
+```
+
+
+
+
+```{r}
+#OPÇÃO 2 de continuação do código anterior
+
+#ter o filtro na população e nos clusters
+
+# Preprocess each population to filter unique genes
+for (p in 1:4) {
+  populacoes[[p]] <- filter_unique_genes(populacoes[[p]]) %>% filter((avg_logFC > 1 | avg_logFC < -1) & p_val_adj < 0.05)
+}
+
+# Create empty matrices for up/down-regulated counts
+tb_count_clusters_pop_dr <- tb_count_clusters_pop_ur <- matrix(
+  data = 0, nrow = 29, ncol = 4,
+  dimnames = list(paste('cluster_', 0:28, sep = ''), names(populacoes))
+)
+
+# Loop through clusters
+for (n in 1:29) {
+  tb_cluster <- Tumorcells.markers[Tumorcells.markers$cluster == (n - 1), ]
+  tb_cluster <- tb_cluster %>% filter((avg_log2FC > 1 | avg_log2FC < -1) & p_val_adj < 0.05)
+
+  down_reg_cluster <- numeric(4)  # Initialize zero-filled vectors
+  up_reg_cluster <- numeric(4)
+
+  # Loop through populations
+  for (z in 1:4) {
+    common_genes <- intersect(tb_cluster$gene, populacoes[[z]]$gene.2)  # Find common genes
+
+    if (length(common_genes) == 0) {
+      # No common genes → set empty vectors
+      log2FC_cluster <- numeric(0)
+      log2FC_pop <- numeric(0)
+      log2FC_consist <- integer(0)
+    } else {
+      log2FC_cluster <- tb_cluster$avg_log2FC[match(common_genes, tb_cluster$gene)]
+      log2FC_pop <- populacoes[[z]]$avg_logFC[match(common_genes, populacoes[[z]]$gene.2)]
+      log2FC_consist_temp <- sign(cbind(log2FC_cluster, log2FC_pop))
+
+      # Determine consistency (-1, 0, or 1)
+      log2FC_consist <- apply(log2FC_consist_temp, 1, function(x) {
+        if (x[1] == x[2]) return(x[1]) else return(0)
+      })
+    }
+
+    # Count occurrences of -1, 0, and 1 explicitly
+    Counts_Pop_logconsist_temp <- table(factor(log2FC_consist, levels = c(-1, 0, 1)))
+
+    down_reg_cluster[z] <- Counts_Pop_logconsist_temp["-1"]  # -1 count
+    up_reg_cluster[z] <- Counts_Pop_logconsist_temp["1"]     # 1 count
+
+    # Create a temporary table with results
+    temp_table_pop <- data.frame(log2FC_cluster, log2FC_pop, log2FC_consist, row.names = common_genes)
+
+    # Name and assign the table dynamically
+    Nomefinal_tab <- paste0('Pop_', names(populacoes)[z], '_cluster', n - 1)
+    assign(Nomefinal_tab, temp_table_pop)
+  }
+
+  # Store results in matrices
+  tb_count_clusters_pop_ur[n, ] <- up_reg_cluster
+  tb_count_clusters_pop_dr[n, ] <- down_reg_cluster
+}
+
+# Print results WITHOUT needing to subtract 1 (fix applied)
+print(tb_count_clusters_pop_dr)
+print(tb_count_clusters_pop_ur)
+```
+
+```{r}
+# Guardar a tabela dos counts dos Markers Tumor Unique Filtrados logFC e p_value nos clusters e populações (ou seja filtrados 2 vezes)
+#UP regulated
+write.csv(tb_count_clusters_pop_ur,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Tabelas dos Counts R\\Unique genes\\Tabelas dos Counts Tumor Cells\\Markers_Tumor_Unique_UR_Filtro_BEM2vezes.csv')
+
+#Down regulated
+write.csv(tb_count_clusters_pop_dr,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Tabelas dos Counts R\\Unique genes\\Tabelas dos Counts Tumor Cells\\Markers_Tumor_Unique_DR_Filtro_BEM2vezes.csv')
+```
+
+
+#Neste momento já tenho genes em comum, tanto gerais como os únicos, em células tumorais e normais. Com os dados na tabelas tb_count_clusters_pop_ur e tb_count_clusters_pop_dr posso perceber quais cluster e populações onde existem maiores níveis de expressão. No entanto seria mais fácil, e de certa forma corroborando os dados desses gráficos, visualizar esses niveis em gráficos. Para isso vou proceder a fazer um Gene Set Enrichment Analysis (GSEA) em que utilizando uma fórmula que combina log Fold-Change e P-Value de cada gene em cada cluster (nos papers de humanos) irá atribuir pontuações que são o peso de cada gene no cluster. Estes permitirão mais tarde fazer um ranking consoante a representação/peso de cada gene no cluster e depois ver qual cluster tem maior peso numa população. Os gráficos serão feitos em Python. 
+
+#Assim vou começar pelas células normais, fazendo uma tabela para cada cluster (são 7) com uma coluna que são os resultados da fórmula do GSEA. O p-value usado será o ajustado, pois é mais correto dado ter sido alvo de vários ajustes de p-values anteriores. Depois faço o mesmo para celulas tumorias e essas tabelas vão em seguida para o Python.
+
+
+```{r}
+rm(list = ls()) #remove as variáveis guardadas
+
+# Abrir o normalcells.markers de Células Normais (Otimização de trabalho)
+
+normalcells.markers <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Normalcells\\normalcells_markers_0.2.rds")
+
+#Ciclo que cria tabelas para cada cluster de células normais com o ranking (portanto ordenado) dos GSEA scores
+
+for (n in 1:length(unique(normalcells.markers$cluster))){
+  tb_cluster_temp<-normalcells.markers[normalcells.markers$cluster==(n-1),]#toda a info de cada cluster
+  tb_cluster<-data.frame(GSEA_score=sign(tb_cluster_temp$avg_log2FC)*(-log10(tb_cluster_temp$p_val_adj+10^(-323))))
+  rownames(tb_cluster)<-tb_cluster_temp$gene #cada linha é legendada por um gene
+  tb_cluster<-tb_cluster[order(tb_cluster$GSEA_score,decreasing = T), ,drop=FALSE]
+  Nomefinal_tab <- paste('GSEA_score_cluster_', n-1, sep="") #novo nome para cada tabela
+  assign(Nomefinal_tab, tb_cluster)
+  # Guardar cada tabela correspondentes a cada cluster de células normais
+write.csv(tb_cluster,paste('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Tabelas ordenadas no R para irem para o Python\\Normal Cells\\ NormalCells_GSEAscore_cluster_',(n-1),'.csv'))
+}
+
+
+# Abrir o tumorcells.markers de Células Tumorais (Otimização de trabalho)
+
+tumorcells.markers <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Tumorcells\\tumorcells_markers_0.2.rds")
+
+#Ciclo que cria tabelas para cada cluster de células Tumorais com o ranking (portanto ordenado) dos GSEA scores
+
+for (n in 1:length(unique(tumorcells.markers$cluster))){
+  tb_cluster_temp<-tumorcells.markers[tumorcells.markers$cluster==(n-1),]#toda a info de cada cluster
+  tb_cluster<-data.frame(GSEA_score=sign(tb_cluster_temp$avg_log2FC)*(-log10(tb_cluster_temp$p_val_adj+10^(-323))))
+  rownames(tb_cluster)<-tb_cluster_temp$gene #cada linha é legendada por um gene
+  tb_cluster<-tb_cluster[order(tb_cluster$GSEA_score,decreasing = T), ,drop=FALSE]
+  Nomefinal_tab <- paste('GSEA_score_cluster_', n-1, sep="") #novo nome para cada tabela
+  assign(Nomefinal_tab, tb_cluster)
+  # Guardar cada tabela correspondentes a cada cluster de células normais
+write.csv(tb_cluster,paste('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Tabelas ordenadas no R para irem para o Python\\Tumor Cells\\ TumorCells_GSEAscore_cluster_',(n-1),'.csv'))
+}
+
+
+```
+
+#Agora as tabelas estão guardadas no meu computador e vou correr a pipeline em Python do Fred para ter Barplot, Dimplot e HeatMap de comparação dos meuss biomarkers contra os data.setss TFT, GO BP, Kegg_Legacy e Hallmark provenientes da Molecular signatures Database da GSEA. Comparei também contra populações de ratinhos (dos de Espanha) cujos LogFC + e - eram maiores que 0 (ou seja contra todos os genes).
+
+#Após obter os heatmaps, conseguimos identificar duas populações em humanos e associar também alguns clusters do cancro (observando o UMAP) a essas populações e certos pathways. Acredito que as populações de células (provenientes de ratinhos) encontradas em Humanos sejam a acinar e a emt pois no heatmap 'Mouse to Human sig Unique logFC0 pos filtered Enrichment Analysis' nas normal cells esses pintaram vermelho.
+
+#Agora vou construir uns gráficos onde comparo a expressão de genes únicos mais expressos em clusters e populações. A ideia é confirmarmos que estes marcadores realmente são mais expressos nesses clusters. Para isso vou colocar no plot o objeto_filtrado_30PCs_Harmony, onde tenho acesso ao número total de um determinado gene (uma célula pode ter vários exemplares do mesmo gene, p.e), e pedir que dê plot dos genes que estão nas tabelas intermédias(referentes a cada cluster e população)[lá acima] que deram origem aos resultados presentas nas tabelas dos counts Up regulated.
+# Começando pelos genes UP do cluster 0 e 2 com acinar e do cluster 3 e 4 com emt, a pedido do Fred, devido ao que observámos nos  Por exemplo: Gráficos dos genes presentes no cluster 0 e população acinar, será que são expressos noutros clusters? (se sim, não são bons para afimrar que o cluster 0 é acinar)
+
+```{r}
+rm(list = ls()) #remove as variáveis guardadas
+
+library(Seurat)
+library(SeuratData)
+library(ggplot2)
+library(patchwork)
+
+#Abrir Objeto_Filtrado_30PCs_Harmony de Células Normais 
+Objeto_Filtrado_NormalCells <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Normalcells\\objeto_filtrado_NormalC_UMAP_30PCs_Harmony.rds")
+
+#Abrir o objeto filtrado 30 PC's Harmony de Células Tumorais 
+
+Objeto_Filtrado_TumorCells <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Tumorcells\\objeto_filtrado_TumorC_UMAP_30PCs_Harmony.rds")
+
+#######################     CÉLULAS NORMAIS     ######################################################
+
+##### Gráficos dos genes presentes no cluster 0 e população acinar. 
+#Após correr o código que inicia na linha 533 a 635 (porque os filtros deram o mesmo resultado, por isso é indiferente usar um ou o outro), percebi que os genes responsáveis pelos 8 counts UP são: 
+lista_genes<-rownames(Pop_acinar_pop_cluster0[Pop_acinar_pop_cluster0$log2FC_consist=='1',])
+
+DotPlot(Objeto_Filtrado_NormalCells , features = lista_genes, cols='RdBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Genes comuns ao cluster 0 e População Acinar')
+
+p <- RidgePlot(Objeto_Filtrado_NormalCells, features = lista_genes, ncol = 2) &  
+  ylab("Clusters")
+
+p + plot_annotation(title = "Genes comuns ao cluster 0 e População Acinar")
+
+p<-VlnPlot(Objeto_Filtrado_NormalCells, features = lista_genes) &  
+  xlab("Clusters")
+
+p + plot_annotation(title = "Genes comuns ao cluster 0 e População Acinar")
+
+##### Gráficos dos genes presentes no cluster 2 e população acinar. 
+#Os genes responsáveis pelos 7 counts UP são: 
+lista_genes<-rownames(Pop_acinar_pop_cluster2[Pop_acinar_pop_cluster2$log2FC_consist=='1',])
+
+DotPlot(Objeto_Filtrado_NormalCells , features = lista_genes, cols='RdYlBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Genes shared by cells of Human cluster 2 and Acinar population')
+
+p <- RidgePlot(Objeto_Filtrado_NormalCells, features = lista_genes, ncol = 2) &  
+  ylab("Clusters")
+
+p + plot_annotation(title = "Genes comuns ao cluster 2 e População Acinar")
+
+p<-VlnPlot(Objeto_Filtrado_NormalCells, features = lista_genes) &  
+  xlab("Clusters")
+
+p + plot_annotation(title = "Genes comuns ao cluster 2 e População Acinar")
+
+# Identificar as células dos clusters 0 e 2
+cells_cluster_0 <- WhichCells(Objeto_Filtrado_NormalCells, idents = 0)
+cells_cluster_2 <- WhichCells(Objeto_Filtrado_NormalCells, idents = 2)
+
+
+# Criar uma lista com as células de cada cluster
+cells_to_highlight <- list(Cluster_0 = cells_cluster_0, Cluster_2 = cells_cluster_2)
+
+# Plotar com cores diferentes para cada cluster
+p<-DimPlot(Objeto_Filtrado_NormalCells, cells.highlight = cells_to_highlight, cols.highlight = c("blue", "red"), cols = "gray")
+p<-p + ggtitle('Proximidade de clusters para identificação de populações Acinar')
+
+
+##### Gráficos dos genes presentes no cluster 3 e população Emt. 
+#Os genes responsáveis pelos 4 counts UP são: 
+lista_genes<-rownames(Pop_emt_pop_cluster3[Pop_emt_pop_cluster3$log2FC_consist=='1',])
+
+DotPlot(Objeto_Filtrado_NormalCells , features = lista_genes, cols='RdYlBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Genes shared by cells of Human cluster 2 and Acinar population')
+
+p <- RidgePlot(Objeto_Filtrado_NormalCells, features = lista_genes, ncol = 2) &  
+  ylab("Clusters")
+
+p + plot_annotation(title = "Genes comuns ao cluster 3 e População Emt")
+
+p<-VlnPlot(Objeto_Filtrado_NormalCells, features = lista_genes) &  
+  xlab("Clusters")
+
+p + plot_annotation(title = "Genes comuns ao cluster 3 e População Emt")
+
+
+##### Gráficos dos genes presentes no cluster 4 e população Emt. 
+#Os genes responsáveis pelos 6 counts UP são: 
+lista_genes<-rownames(Pop_emt_pop_cluster4[Pop_emt_pop_cluster4$log2FC_consist=='1',])
+
+DotPlot(Objeto_Filtrado_NormalCells , features = lista_genes, cols='RdYlBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Genes comuns ao cluster 4 e População Emt')
+
+p <- RidgePlot(Objeto_Filtrado_NormalCells, features = lista_genes, ncol = 2) &  
+  ylab("Clusters")
+
+p + plot_annotation(title = "Genes comuns ao cluster 4 e População Emt")
+
+p<-VlnPlot(Objeto_Filtrado_NormalCells, features = lista_genes) &  
+  xlab("Clusters")
+
+p + plot_annotation(title = "Genes comuns ao cluster 4 e População Emt")
+
+# Identificar as células dos clusters 0 e 2
+cells_cluster_3 <- WhichCells(Objeto_Filtrado_NormalCells, idents = 3)
+cells_cluster_4 <- WhichCells(Objeto_Filtrado_NormalCells, idents = 4)
+
+# Criar uma lista com as células de cada cluster
+cells_to_highlight <- list(Cluster_3 = cells_cluster_3, Cluster_4 = cells_cluster_4)
+
+# Plotar com cores diferentes para cada cluster
+p<-DimPlot(Objeto_Filtrado_NormalCells, cells.highlight = cells_to_highlight, cols.highlight = c("blue", "red"), cols = "gray")
+p<-p + ggtitle('Proximidade de clusters para identificação de populações Emt')
+
+
+
+
+
+##### Gráficos dos genes presentes no cluster 6 e população Emt. 
+#Os genes responsáveis pelos 6 counts UP são: 
+lista_genes<-rownames(Pop_emt_pop_cluster6[Pop_emt_pop_cluster6$log2FC_consist=='1',])
+
+DotPlot(Objeto_Filtrado_NormalCells , features = lista_genes, cols='RdBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Genes comuns ao cluster 6 e População Emt')
+
+p <- RidgePlot(Objeto_Filtrado_NormalCells, features = lista_genes, ncol = 2) &  
+  ylab("Clusters")
+
+p + plot_annotation(title = "Genes comuns ao cluster 6 e População Emt")
+
+p<-VlnPlot(Objeto_Filtrado_NormalCells, features = lista_genes) &  
+  xlab("Clusters")
+
+p + plot_annotation(title = "Genes comuns ao cluster 6 e População Emt")
+
+
+##### Gráficos dos genes presentes no cluster 1 e população Stem. (para tentarmos perceber a constituição, pois os counts são imensos e não aparece no heatmap)
+#Os genes responsáveis pelos 16 counts UP são: 
+lista_genes<-rownames(Pop_stem_pop_cluster1[Pop_stem_pop_cluster1$log2FC_consist=='1',])
+logFC<- normalcells.markers$avg_log2FC[normalcells.markers$cluster == 1 & normalcells.markers$gene %in% lista_genes]
+p_value<-normalcells.markers$p_val_adj[normalcells.markers$cluster == 1 & normalcells.markers$gene %in% lista_genes]
+logsFc_e_pvalue<-cbind(logFC,p_value)
+row.names(logsFc_e_pvalue)<-lista_genes
+logsFc_e_pvalue<-data.frame(logsFc_e_pvalue)
+
+DotPlot(Objeto_Filtrado_NormalCells , features = lista_genes, cols='RdBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Genes comuns ao cluster 1 e População Stem')
+
+
+##### Gráficos dos genes presentes no cluster 3 e população Stem. (para tentarmos perceber a constituição, pois os counts são imensos e não aparece no heatmap)
+#Os genes responsáveis pelos 24 counts UP são: 
+lista_genes<-rownames(Pop_stem_pop_cluster3[Pop_stem_pop_cluster3$log2FC_consist=='1',])
+logFC<- normalcells.markers$avg_log2FC[normalcells.markers$cluster == 3 & normalcells.markers$gene %in% lista_genes]
+p_value<-normalcells.markers$p_val_adj[normalcells.markers$cluster == 3 & normalcells.markers$gene %in% lista_genes]
+logsFc_e_pvalue<-cbind(logFC,p_value)
+row.names(logsFc_e_pvalue)<-lista_genes
+logsFc_e_pvalue<-data.frame(logsFc_e_pvalue)
+
+DotPlot(Objeto_Filtrado_NormalCells , features = lista_genes, cols='RdBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Genes comuns ao cluster 3 e População Stem')
+
+
+
+
+##### Gerar Dimplot com TODAS as populações ENCONTRADAS em células normais (2 tipos, um com clusters e outro com populações)
+
+#Dimplot para ver todos os clusters
+# Identificar as células dos clusters
+cells_cluster_0 <- WhichCells(Objeto_Filtrado_NormalCells, idents = 0)
+cells_cluster_2 <- WhichCells(Objeto_Filtrado_NormalCells, idents = 2)
+cells_cluster_3 <- WhichCells(Objeto_Filtrado_NormalCells, idents = 3)
+cells_cluster_4 <- WhichCells(Objeto_Filtrado_NormalCells, idents = 4)
+
+
+# Criar uma lista com as células de cada cluster
+cells_to_highlight <- list(Cluster_0 = cells_cluster_0, Cluster_2 = cells_cluster_2, Cluster_3 = cells_cluster_3,Cluster_4 = cells_cluster_4)
+
+# Plotar com cores diferentes para cada cluster
+p<-DimPlot(Objeto_Filtrado_NormalCells, cells.highlight = cells_to_highlight, cols.highlight = c("blue2", "red1",'orange','cyan'), cols = "gray")
+p<-p + ggtitle('Distribution of Normal Human Cell Clusters')+ theme(plot.title = element_text(hjust = 0.5))
+
+
+
+
+#Dimplot para ver todas as populações
+# Identificar as células dos clusters
+cells_cluster_0 <- WhichCells(Objeto_Filtrado_NormalCells, idents = 0)
+cells_cluster_2 <- WhichCells(Objeto_Filtrado_NormalCells, idents = 2)
+cells_cluster_3 <- WhichCells(Objeto_Filtrado_NormalCells, idents = 3)
+cells_cluster_4 <- WhichCells(Objeto_Filtrado_NormalCells, idents = 4)
+
+
+# Criar uma lista com as células de cada cluster
+cells_to_highlight <- list(Emt= c(cells_cluster_3,cells_cluster_4),Acinar=c(cells_cluster_0,cells_cluster_2))
+
+# Plotar com cores diferentes para cada cluster
+q<-DimPlot(Objeto_Filtrado_NormalCells, cells.highlight = cells_to_highlight, cols.highlight = c("blue2",'orange'), cols = "gray")
+q<-q + ggtitle('Populations found in Normal Human Cells')+theme(plot.title = element_text(hjust = 0.5))
+
+p+q
+
+
+
+
+
+#######################     CÉLULAS TUMORAIS    ##########################################
+
+
+##### Gráficos dos genes presentes no cluster 16 e população Emt. 
+#Os genes responsáveis pelos 40 counts UP são: 
+lista_genes<-rownames(Pop_emt_cluster16[Pop_emt_cluster16$log2FC_consist=='1',])
+
+DotPlot(Objeto_Filtrado_TumorCells , features = lista_genes, cols='RdBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Genes comuns ao cluster 16 e População Emt')
+
+#selecionar genes com maior interesse:
+genes_uteis<-c('FN1', 'TAGLN', 'MYL9', 'FLNA')
+
+genes_uteis2<-c('PALLD', 'ITGA3', 'TGFB1I1', 'DRAP1') #não mostrou nada de especial
+
+p <- RidgePlot(Objeto_Filtrado_TumorCells, features = genes_uteis, ncol = 2) &  
+  ylab("Clusters")
+
+p + plot_annotation(title = "Genes comuns ao cluster 16 e População Emt")
+
+p<-VlnPlot(Objeto_Filtrado_TumorCells, features = genes_uteis, ncol=2) &  
+  xlab("Clusters")
+
+p + plot_annotation(title = "Genes comuns ao cluster 16 e População Emt")
+
+
+# Identificar as células dos clusters 1 e 16
+cells_cluster_1 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 1)
+cells_cluster_16 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 16)
+cells_cluster_20 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 20)
+cells_cluster_25 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 25)
+
+# Criar uma lista com as células de cada cluster
+cells_to_highlight <- list(Cluster_1 = cells_cluster_1, Cluster_16 = cells_cluster_16, Cluster_20 = cells_cluster_20, Cluster_25 = cells_cluster_25)
+
+# Plotar com cores diferentes para cada cluster
+p<-DimPlot(Objeto_Filtrado_TumorCells, cells.highlight = cells_to_highlight, cols.highlight = c("blue", "red",'green','orange'), cols = "gray")
+p<-p + ggtitle('Proximidade de clusters para identificação de populações Emt')
+
+
+##### Gráficos dos genes presentes no cluster 17 e população Stem. 
+#Os genes responsáveis pelos 68 counts UP são: 
+
+top20logFC<-head(Pop_stem_cluster17[order(Pop_stem_cluster17$log2FC_cluster,decreasing = T), ,drop=FALSE],20)
+lista_genes<-rownames(top20logFC[top20logFC$log2FC_consist=='1',])
+
+DotPlot(Objeto_Filtrado_TumorCells , features = lista_genes, cols='RdBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Top20 Genes comuns ao cluster 17 e População Stem')
+
+#selecionar genes com maior interesse:
+genes_uteis<-c('SULT1C2','HMGCS2','ARL14','PHGR1')
+
+p <- RidgePlot(Objeto_Filtrado_TumorCells, features = genes_uteis, ncol = 2) &  
+  ylab("Clusters")
+
+p + plot_annotation(title = "Genes comuns ao cluster 17 e População Stem")
+
+p<-VlnPlot(Objeto_Filtrado_TumorCells, features = genes_uteis, ncol=2) &  
+  xlab("Clusters")
+
+p + plot_annotation(title = "Genes comuns ao cluster 17 e População Stem")
+
+
+# Identificar as células dos clusters 17 e 18
+cells_cluster_17 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 17)
+cells_cluster_18 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 18)
+
+
+# Criar uma lista com as células de cada cluster
+cells_to_highlight <- list(Cluster_17 = cells_cluster_17, Cluster_18 = cells_cluster_18)
+
+# Plotar com cores diferentes para cada cluster
+p<-DimPlot(Objeto_Filtrado_TumorCells, cells.highlight = cells_to_highlight, cols.highlight = c("blue", "red"), cols = "gray")
+p<-p + ggtitle('Proximidade de clusters para identificação de populações Stem')
+
+
+
+##### Gráficos dos genes presentes no cluster 4 e população Stem. 
+#Os genes responsáveis pelos 67 counts UP são: 
+
+top20logFC<-head(Pop_stem_cluster4[order(Pop_stem_cluster4$log2FC_cluster,decreasing = T), ,drop=FALSE],20)
+lista_genes<-rownames(top20logFC[top20logFC$log2FC_consist=='1',])
+
+DotPlot(Objeto_Filtrado_TumorCells , features = lista_genes, cols='RdBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Top20 Genes comuns ao cluster 4 e População Stem')
+
+#selecionar genes com maior interesse:
+
+p<-VlnPlot(Objeto_Filtrado_TumorCells, features = c('AGR2','PHGR1'), ncol=2) &  
+  xlab("Clusters")
+
+p + plot_annotation(title = "Genes comuns ao cluster 4 e População Stem")
+
+
+# Identificar as células dos clusters 17 e 18
+cells_cluster_4 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 4)
+cells_cluster_17 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 17)
+cells_cluster_18 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 18)
+
+
+# Criar uma lista com as células de cada cluster
+cells_to_highlight <- list(Cluster_4= cells_cluster_4, Cluster_17 = cells_cluster_17, Cluster_18 = cells_cluster_18)
+
+# Plotar com cores diferentes para cada cluster
+p<-DimPlot(Objeto_Filtrado_TumorCells, cells.highlight = cells_to_highlight, cols.highlight = c("blue", "red",'green'), cols = "gray")
+p<-p + ggtitle('Proximidade de clusters para identificação de populações Stem')
+
+
+
+##### Gráficos dos genes presentes no cluster 9 e população Acinar. 
+#Os genes responsáveis pelos 10 counts UP são: 
+lista_genes<-rownames(Pop_acinar_cluster9[Pop_acinar_cluster9$log2FC_consist=='1',])
+
+DotPlot(Objeto_Filtrado_TumorCells , features = lista_genes, cols='RdBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Genes comuns ao cluster 9 e População Acinar')
+
+#selecionar genes com maior interesse:
+genes_uteis<-c('GP2','CPA2','SPINK1','CUZD1')
+
+genes_uteis2<-c('PDIA2', 'KLK1', 'GATM', 'GAMT')
+
+genes_uteis3<-c('SERPINI2','TMEM97')
+
+p<-VlnPlot(Objeto_Filtrado_TumorCells, features = genes_uteis3, ncol=2) &  
+  xlab("Clusters")
+
+p + plot_annotation(title = "Genes comuns ao cluster 9 e População Acinar")
+
+
+# Identificar as células dos clusters 0,9 e 23
+cells_cluster_0 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 0)
+cells_cluster_9 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 9)
+cells_cluster_23 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 23)
+
+
+# Criar uma lista com as células de cada cluster
+cells_to_highlight <- list(Cluster_0 = cells_cluster_0, Cluster_9 = cells_cluster_9, Cluster_23 = cells_cluster_23)
+
+# Plotar com cores diferentes para cada cluster
+p<-DimPlot(Objeto_Filtrado_TumorCells, cells.highlight = cells_to_highlight, cols.highlight = c("blue", "red",'green'), cols = "gray")
+p<-p + ggtitle('Proximidade de clusters para identificação de populações Acinar')
+
+
+
+##### Gráficos dos genes presentes no cluster 28 e população Ifn. 
+#Os genes responsáveis pelos 28 counts UP são: 
+lista_genes<-rownames(Pop_ifn_cluster28[Pop_ifn_cluster28$log2FC_consist=='1',])
+
+DotPlot(Objeto_Filtrado_TumorCells , features = lista_genes, cols='RdBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Genes comuns ao cluster 28 e População Ifn')
+
+#selecionar genes com maior interesse:
+genes_uteis<-c('IFIT1','RSAD2','IFIH1','ISG20')
+
+genes_uteis2<-c('RTP4', 'PSMB9', 'SAMD9L', 'IFI44')
+
+genes_uteis3<-c('PARP14','UBE2L6','DDX60','TAP1')
+
+genes_uteis4<-c('PARP9','IRF7','IFI35','ZNFX1')
+
+genes_uteis5<-c('PSMB8','SP100','STAT1','MITD1')
+
+
+p<-VlnPlot(Objeto_Filtrado_TumorCells, features = genes_uteis, ncol=2) &  
+  xlab("Clusters")
+
+p + plot_annotation(title = "Genes comuns ao cluster 28 e População Ifn")
+
+
+# Identificar as células dos clusters 0,9 e 23
+cells_cluster_2 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 2)
+cells_cluster_12 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 12)
+cells_cluster_28 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 28)
+
+
+
+# Criar uma lista com as células de cada cluster
+cells_to_highlight <- list(Cluster_2 = cells_cluster_2, Cluster_12 = cells_cluster_12, Cluster_28 = cells_cluster_28)
+
+# Plotar com cores diferentes para cada cluster
+p<-DimPlot(Objeto_Filtrado_TumorCells, cells.highlight = cells_to_highlight, cols.highlight = c("blue", "red",'green'), cols = "gray")
+p<-p + ggtitle('Proximidade de clusters para identificação de populações Ifn')
+
+
+
+##### Gerar Dimplot com TODAS as populações ENCONTRADAS em células tumorais (2 tipos, um com clusters e outro com populações)
+
+#Dimplot para ver todos os clusters
+# Identificar as células dos clusters
+cells_cluster_1 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 1)
+cells_cluster_16 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 16)
+cells_cluster_4 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 4)
+cells_cluster_17 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 17)
+cells_cluster_28 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 28)
+cells_cluster_0 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 0)
+cells_cluster_9 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 9)
+cells_cluster_23 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 23)
+
+
+# Criar uma lista com as células de cada cluster
+cells_to_highlight <- list(Cluster_1 = cells_cluster_1, Cluster_16 = cells_cluster_16, Cluster_4 = cells_cluster_4,Cluster_17 = cells_cluster_17, Cluster_28 = cells_cluster_28, Cluster_0 = cells_cluster_0,Cluster_9 = cells_cluster_9, Cluster_23 = cells_cluster_23)
+
+# Plotar com cores diferentes para cada cluster
+p<-DimPlot(Objeto_Filtrado_TumorCells, cells.highlight = cells_to_highlight, cols.highlight = c("blue2", "red1",'green2','orange','pink','brown4','cyan','yellow4'), cols = "gray")
+p<-p + ggtitle('Proximidade de clusters em tumor cells')
+
+
+
+#Dimplot para ver todas as populações
+# Identificar as células dos clusters
+cells_cluster_1 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 1)
+cells_cluster_16 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 16)
+cells_cluster_4 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 4)
+cells_cluster_17 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 17)
+cells_cluster_28 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 28)
+cells_cluster_0 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 0)
+cells_cluster_9 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 9)
+cells_cluster_23 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 23)
+
+
+# Criar uma lista com as células de cada cluster
+cells_to_highlight <- list(Emt_cells = c(cells_cluster_1,cells_cluster_16), Stem_cells = c(cells_cluster_4,cells_cluster_17),Ifn_cells = cells_cluster_28,Acinar_cells=c(cells_cluster_0,cells_cluster_9,cells_cluster_23))
+
+# Plotar com cores diferentes para cada cluster
+q<-DimPlot(Objeto_Filtrado_TumorCells, cells.highlight = cells_to_highlight, cols.highlight = c("blue2", "red1",'orange','cyan'), cols = "gray")
+q<-q + ggtitle('Populações presentes em tumor cells')
+
+p+q
+
+
+
+```
+
+#Basicamente enganei-me a filtrar os clusters e população porque usámos filter(avg_log2FC > 1 | avg_log2FC < -1 | p_val_adj < 0.05) ao invés de filter ((avg_log2FC > 1 | avg_log2FC < -1) & p_val_adj < 0.05), sendo por isso as tabelas dos counts menos restritivas. No entanto, optámos por continuar com as tabelas do ous, e depois na discussão se me perguntarem porque não foi tão restrito nos filtros respondo que este filtro restringiu demasiado os genes (em normais foi quase tudo corrido a 0s) e que a vantagem do GSEA é que não aplica os filtros de forma tão restrita como nós, mas sim avalia todos genes, não apenas os que nós escolhemos filtrar. Ou seja, o GSEA como considera os genes todos, podemos estar a ver efeitos causados por pequenas alterações de muitos genes. Enquanto que assim só a cruzarmos tabelas basta ser mais restrito nos filtros que os resultados mudam drasticamente.
+# COm isto, significa que posso continuar a usar o que fiz anteriormente.
+
+#a análise de cada biomarcador está num documento word que fiz
+
+
+#Após ver de forma geral a forma como cada gene em comum é expresso e averiguar possíveis biomarcadores, vou agora proceder à análise da expressão de genes com maior log2FC relativos às populações que acreditamos ter encontrado (tanto em normal cells como em tumor cells). Ou seja, vou ver os níveis de expressão em cada cluster dos genes com maior log2FC (>1) de cada população "dita encontrada" (pode permitir corroborar a nossa opinião). Isto será feito com recurso a dotplots
+
+```{r}
+
+#Para normal cells
+TopAcinargenes<-acinar_data$gene.2[acinar_data$avg_logFC>1]
+q<-DotPlot(Objeto_Filtrado_NormalCells , features = TopAcinargenes, cols='RdBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Normal Cells | Top Log2FC Acinar genes')
+
+TopEmtgenes<-emt_data$gene.2[emt_data$avg_logFC>1]
+p<-DotPlot(Objeto_Filtrado_NormalCells , features = TopEmtgenes, cols='RdBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Normal Cells | Top Log2FC Emt genes')
+
+
+#Para tumor cells
+TopAcinargenes<-acinar_data$gene.2[acinar_data$avg_logFC>1]
+DotPlot(Objeto_Filtrado_TumorCells , features = TopAcinargenes, cols='RdBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Tumor Cells | Top Log2FC Acinar genes')
+
+
+TopEmtgenes<-emt_data$gene.2[emt_data$avg_logFC>1]
+DotPlot(Objeto_Filtrado_TumorCells , features = TopEmtgenes, cols='RdBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Tumor Cells | Top Log2FC Emt genes')
+
+TopIfngenes<-ifn_data$gene.2[ifn_data$avg_logFC>1]
+DotPlot(Objeto_Filtrado_TumorCells , features = TopIfngenes, cols='RdBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Tumor Cells | Top Log2FC Ifn genes')
+
+TopStemgenes<-stem_data$gene.2[stem_data$avg_logFC>1]
+DotPlot(Objeto_Filtrado_TumorCells , features = TopStemgenes, cols='RdBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Tumor Cells | Top Log2FC Stem genes')
+
+
+
+#REMAKES no Dimplots com base nas observações destes dotplots
+
+#Tumor Cells
+#REMAKE do Acinar
+
+# Identificar as células dos clusters 0,9,20 e 23
+cells_cluster_0 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 0)
+cells_cluster_9 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 9)
+cells_cluster_20 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 20)
+cells_cluster_23 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 23)
+
+# Criar uma lista com as células de cada cluster
+cells_to_highlight <- list(Cluster_0 = cells_cluster_0, Cluster_9 = cells_cluster_9, Cluster_20 = cells_cluster_20, Cluster_23 = cells_cluster_23)
+
+# Plotar com cores diferentes para cada cluster
+p<-DimPlot(Objeto_Filtrado_TumorCells, cells.highlight = cells_to_highlight, cols.highlight = c("blue", "red",'green','orange'), cols = "gray")
+p<-p + ggtitle('Proximidade de clusters para identificação de populações Acinar')
+
+
+#REMAKE do Ifn
+
+# Identificar as células dos clusters 0,9,20 e 23
+cells_cluster_28 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 28)
+cells_cluster_19 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 19)
+cells_cluster_12 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 12)
+cells_cluster_25 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 25)
+
+# Criar uma lista com as células de cada cluster
+cells_to_highlight <- list(Cluster_28 = cells_cluster_28, Cluster_19 = cells_cluster_19, Cluster_12 = cells_cluster_12, Cluster_25 = cells_cluster_25)
+
+# Plotar com cores diferentes para cada cluster
+p<-DimPlot(Objeto_Filtrado_TumorCells, cells.highlight = cells_to_highlight, cols.highlight = c("blue", "red",'green','orange'), cols = "gray")
+p<-p + ggtitle('Proximidade de clusters para identificação de populações Ifn')
+
+
+
+```
+
+#Neste ponto já respondi a ambas as hipóteses.
+#Após receber feedback da Ana Rita e do Fred, irei primeiramente procurar gerar um Dimplot de UMAP com os clusters a corresponder a células tumorais de pacientes.O objetivo final disto será perceber qual o maior número de células de uma determinada população num paciente e depois ver como isso impacta o tipo de população que se oberva no tumor.
+
+
+```{r}
+rm(list = ls()) #remove as variáveis guardadas
+
+library(Seurat)
+library(SeuratData)
+library(ggplot2)
+library(patchwork)
+
+#Abrir o objeto filtrado inical
+Objeto_Filtrado_30PCs <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Tumorcells\\objeto_filtrado_TumorC_UMAP_30PCs.rds")
+
+library(harmony)
+
+# Realiza o Harmony num novo objeto para não influenciar o código anterior (caso queira revê-lo posteriormente, pois o resultado do UMAP irá variar no código posterior )
+
+Objeto_Filtrado_30PCs_Harmony<-RunHarmony(Objeto_Filtrado_30PCs, group.by.vars = c('orig.ident','SampleID'), plot_convergence=FALSE) #Faz-se a correção considerando as variáveis SampleID e o paper, ao invés de cada cluster ser só de uma dessas variáveis.
+
+#Realizar o UMAP e clustering usando os embeddings (outputs) do Harmony em vez do PCA (os PC's)
+ 
+Objeto_Filtrado_30PCs_Harmony<- Objeto_Filtrado_30PCs_Harmony %>%
+  RunUMAP(reduction='harmony',dims=1:30)%>%
+  FindNeighbors(reduction='harmony', dims=1:30)%>%
+  FindClusters(resolution=0.5)
+
+#Realiza o Dimplot por ID paciente
+p<-DimPlot(Objeto_Filtrado_30PCs_Harmony, reduction = "umap", group.by='orig.ident')
+p<-p + ggtitle('UMAP para células tumorais por paciente | Papers')
+q<-DimPlot(Objeto_Filtrado_30PCs_Harmony, reduction = "umap", group.by='SampleID')
+q<-q + ggtitle('UMAP para células tumorais por paciente | SampleID ')
+r<-DimPlot(Objeto_Filtrado_30PCs_Harmony, reduction = "umap")
+r<-r + ggtitle('UMAP para células tumorais por paciente | Clusters')
+
+
+#Guardar o Objeto filtrado de tumor cells por paciente Harmonizado (considerando paper e paciente)
+saveRDS(Objeto_Filtrado_30PCs_Harmony ,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Tumorcells\\Objeto_filtrado_Harmony_Pacientes.rds')
+
+#Abrir o Objeto_Filtrado_30PCs_Harmony (considerando paper e paciente)
+Objeto_Filtrado_30PCs_Harmony <-readRDS('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Tumorcells\\Objeto_filtrado_Harmony_Pacientes.rds')
+
+# Reduzir os nomes dos pacientes para apenas Tn ou Pn (para os gráficos)
+Objeto_Filtrado_30PCs$SampleID_reduced <- gsub(".*_(T\\d+|P\\d+)", "\\1", Objeto_Filtrado_30PCs$SampleID)
+Objeto_Filtrado_30PCs_Harmony$SampleID_reduced <- gsub(".*_(T\\d+|P\\d+)", "\\1", Objeto_Filtrado_30PCs_Harmony$SampleID)
+
+# Substituir 3 por GSE134355 e 4 por GSE154778 em 'orig.ident'
+Objeto_Filtrado_30PCs$Study_recode <- gsub("^3.*", "GSE134355", Objeto_Filtrado_30PCs$orig.ident)
+Objeto_Filtrado_30PCs$Study_recode <- gsub("^4.*", "GSE154778", Objeto_Filtrado_30PCs$Study_recode)
+
+Objeto_Filtrado_30PCs_Harmony$Study_recode <- gsub("^3.*", "GSE134355", Objeto_Filtrado_30PCs_Harmony$orig.ident)
+Objeto_Filtrado_30PCs_Harmony$Study_recode <- gsub("^4.*", "GSE154778", Objeto_Filtrado_30PCs_Harmony$Study_recode)
+
+#Realiza o Dimplot por ID paciente como deve ser
+q1<-DimPlot(Objeto_Filtrado_30PCs, reduction = "umap", group.by='SampleID_reduced')
+q1<-q1 + ggtitle('Before Harmony | Patients')+theme(plot.title = element_text(hjust = 0.5))
+q2<- DimPlot(Objeto_Filtrado_30PCs, reduction = "umap", group.by='Study_recode')
+q2<-q2 + ggtitle('Before Harmony | Studies')+theme(plot.title = element_text(hjust = 0.5))
+q3<-DimPlot(Objeto_Filtrado_30PCs_Harmony, reduction = "umap", group.by='SampleID_reduced')
+q3<-q3 + ggtitle('After Harmony | Patients')+theme(plot.title = element_text(hjust = 0.5))
+q4<-DimPlot(Objeto_Filtrado_30PCs_Harmony, reduction = "umap", group.by='Study_recode')
+q4<-q4 + ggtitle('After Harmony | Studies')+theme(plot.title = element_text(hjust = 0.5))
+q5<-DimPlot(Objeto_Filtrado_30PCs, reduction='umap')
+q5<-q5 + ggtitle('Before Harmony | Clusters')+theme(plot.title = element_text(hjust = 0.5))
+q6<-DimPlot(Objeto_Filtrado_30PCs_Harmony, reduction='umap')
+q6<-q6 + ggtitle('After Harmony | Clusters')+theme(plot.title = element_text(hjust = 0.5))
+
+q1+q2+q5+q3+q4+q6
+  
+
+```
+
+
+
+#Agora que já realizei o UMAP e corri novamente o Harmony para ajustar de acordo com novas variáveis que agora nos importam estudar, vou procurar novamente biomarkers e guardá-los. Depois realizarei novamente o GSEA.
+```{r}
+#Encontra os markers
+tummorcells.markers <- FindAllMarkers(Objeto_Filtrado_30PCs_Harmony, min.pct = 0.2) # Para os 20 clusters
+
+
+#Guardar os biomarkers de tumor cells por paciente Harmonizado (considerando paper e paciente)
+saveRDS(tummorcells.markers,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Tumorcells\\tumorcells_markers_Pacientes.rds')
+
+```
+
+```{r}
+
+rm(list = ls()) #remove as variáveis guardadas
+
+#Abrir o biomarkers de tumor cells por paciente Harmonizado (considerando paper e paciente)
+tumorcells.markers <- readRDS('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Tumorcells\\tumorcells_markers_Pacientes.rds')
+
+#Ciclo que cria tabelas para cada cluster de células Tumorais com o ranking (portanto ordenado) dos GSEA scores
+
+for (n in 1:length(unique(tumorcells.markers$cluster))){
+  tb_cluster_temp<-tumorcells.markers[tumorcells.markers$cluster==(n-1),]#toda a info de cada cluster
+  tb_cluster<-data.frame(GSEA_score=sign(tb_cluster_temp$avg_log2FC)*(-log10(tb_cluster_temp$p_val_adj+10^(-323))))
+  rownames(tb_cluster)<-tb_cluster_temp$gene #cada linha é legendada por um gene
+  tb_cluster<-tb_cluster[order(tb_cluster$GSEA_score,decreasing = T), ,drop=FALSE]
+  Nomefinal_tab <- paste('GSEA_score_cluster_', n-1, sep="") #novo nome para cada tabela
+  assign(Nomefinal_tab, tb_cluster)
+  # Guardar cada tabela correspondentes a cada cluster de células normais
+write.csv(tb_cluster,paste('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Tabelas ordenadas no R para irem para o Python\\Tumor Cells\\Pacientes\\ TumorCells_Paciente_GSEAscore_cluster_',(n-1),'.csv', sep=""))
+}
+```
+
+#Agora vou correr os csv's no Python e comparar também a um novo documento com markers de Basal e classical subtypes e um intermédio entre os dois. 
+#Já fiz um apanhado da informação obtida nos 3 heatmaps.
+#Com base nisso, vou fazer dotplots para perceber quais a populações a que pertencem.
+#antes disso tenho de voltar a gerar as tabelas dos genes em comum.
+
+```{r}
+#PARA PACIENTES AGORA:
+#Ver o genes ÚNICOS de células tumorais em comum entre as populações de ratinhos e humanos de forma geral:
+
+rm(list = ls()) #remove as variáveis guardadas
+
+library(dplyr)
+library(Seurat)
+library(patchwork)
+
+# Abrir o Tumorcells.markes (tendo em conta pacientes)
+Tumorcells.markers <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Tumorcells\\tumorcells_markers_Pacientes.rds")
+
+
+#Carregar dados das populações de ratinhos
+
+ifn_data<-read.table('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\biomarcadores\\ifn.txt', header=T, sep='\t', dec=',')
+
+acinar_data<-read.table('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\biomarcadores\\acinar.txt', header=T, sep='\t', dec=',')
+
+emt_data<-read.table('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\biomarcadores\\emt.txt', header=T, sep='\t', dec=',')
+
+stem_data<-read.table('C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\biomarcadores\\stem.txt', header=T, sep='\t', dec=',')
+
+###criar tabelas para cada cluster  com os genes únicos comuns a cada população e os respetivos logFC 
+populacoes<-list('acinar'=acinar_data,'emt'=emt_data,'ifn'=ifn_data, 'stem'=stem_data) #lista com cada tabela para melhor acesso
+
+todos.genes.pop<-c(acinar_data$gene.2,emt_data$gene.2,ifn_data$gene.2,stem_data$gene.2) #lista com todos os genes das populações
+contar.genes.pop<-table(todos.genes.pop) #frequência de cada gene nas 5 populações
+genes.duplicados.pop<-names(contar.genes.pop[contar.genes.pop>1]) #lista com todos os genes que não são únicos nas 5 populações
+
+filter_unique_genes<-function(tabela){
+  tabela[!tabela$gene.2 %in% genes.duplicados.pop, ,drop= FALSE]
+}
+
+#ter o filtro  clusters
+# Preprocess each population to filter unique genes
+for (p in 1:4) {
+  populacoes[[p]] <- filter_unique_genes(populacoes[[p]]) 
+}
+
+# Create empty matrices for up/down-regulated counts
+tb_count_clusters_pop_dr <- tb_count_clusters_pop_ur <- matrix(
+  data = 0, nrow = 21, ncol = 4,
+  dimnames = list(paste('cluster_', 0:20, sep = ''), names(populacoes))
+)
+
+# Loop through clusters
+for (n in 1:21) {
+  tb_cluster <- Tumorcells.markers[Tumorcells.markers$cluster == (n - 1), ]
+  tb_cluster <- tb_cluster %>% filter(avg_log2FC > 1 | avg_log2FC < -1 | p_val_adj < 0.05) #este filtro é mais vasto (se bem que não é o ideal mas senão for este fico sem genes ahahaha)
+
+  down_reg_cluster <- numeric(4)  # Initialize zero-filled vectors
+  up_reg_cluster <- numeric(4)
+
+  # Loop through populations
+  for (z in 1:4) {
+    common_genes <- intersect(tb_cluster$gene, populacoes[[z]]$gene.2)  # Find common genes
+
+    if (length(common_genes) == 0) {
+      # No common genes → set empty vectors
+      log2FC_cluster <- numeric(0)
+      log2FC_pop <- numeric(0)
+      log2FC_consist <- integer(0)
+    } else {
+      log2FC_cluster <- tb_cluster$avg_log2FC[match(common_genes, tb_cluster$gene)]
+      log2FC_pop <- populacoes[[z]]$avg_logFC[match(common_genes, populacoes[[z]]$gene.2)]
+      log2FC_consist_temp <- sign(cbind(log2FC_cluster, log2FC_pop))
+
+      # Determine consistency (-1, 0, or 1)
+      log2FC_consist <- apply(log2FC_consist_temp, 1, function(x) {
+        if (x[1] == x[2]) return(x[1]) else return(0)
+      })
+    }
+
+    # Count occurrences of -1, 0, and 1 explicitly
+    Counts_Pop_logconsist_temp <- table(factor(log2FC_consist, levels = c(-1, 0, 1)))
+
+    down_reg_cluster[z] <- Counts_Pop_logconsist_temp["-1"]  # -1 count
+    up_reg_cluster[z] <- Counts_Pop_logconsist_temp["1"]     # 1 count
+
+    # Create a temporary table with results
+    temp_table_pop <- data.frame(log2FC_cluster, log2FC_pop, log2FC_consist, row.names = common_genes)
+
+    # Name and assign the table dynamically
+    Nomefinal_tab <- paste0('Pop_', names(populacoes)[z], '_cluster', n - 1)
+    assign(Nomefinal_tab, temp_table_pop)
+  }
+
+  # Store results in matrices
+  tb_count_clusters_pop_ur[n, ] <- up_reg_cluster
+  tb_count_clusters_pop_dr[n, ] <- down_reg_cluster
+}
+
+# Print results WITHOUT needing to subtract 1 (fix applied)
+print(tb_count_clusters_pop_dr)
+print(tb_count_clusters_pop_ur)
+
+
+```
+
+```{r}
+# Guardar a tabela dos counts dos Markers Tumor Unique ( Pacientes )
+#UP regulated
+write.csv(tb_count_clusters_pop_ur,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Tabelas dos Counts R\\Unique genes\\Tabelas dos Counts Tumor Cells\\Markers_Tumor_Unique_UR_Pacientes.csv')
+
+#Down regulated
+write.csv(tb_count_clusters_pop_dr,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Tabelas dos Counts R\\Unique genes\\Tabelas dos Counts Tumor Cells\\Markers_Tumor_Unique_DR_Pacientes.csv')
+```
+
+
+```{r}
+
+library(Seurat)
+library(SeuratData)
+library(ggplot2)
+library(patchwork)
+
+#(necessário correr o codigo da linha 1794)!
+
+#Abrir o objeto filtrado de Células Tumorais Harmony Pacientes
+
+Objeto_Filtrado_TumorCells <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Tumorcells\\Objeto_filtrado_Harmony_Pacientes.rds")
+
+
+
+#######################     CÉLULAS TUMORAIS    ##########################################
+
+##### Gráficos dos genes presentes no cluster 0 e população Stem. 
+#Os genes responsáveis pelos 65 counts UP são: 
+top20logFC<-head(Pop_stem_cluster0[order(Pop_stem_cluster0$log2FC_cluster,decreasing = T), ,drop=FALSE],20)
+lista_genes<-rownames(top20logFC[top20logFC$log2FC_consist=='1',])
+
+DotPlot(Objeto_Filtrado_TumorCells , features = lista_genes, cols='RdYlBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Top20 Genes comuns ao cluster 0 e População Stem')
+
+
+# Identificar as células dos clusters 0, 8 e 13
+cells_cluster_0 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 0)
+cells_cluster_8 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 8)
+cells_cluster_13 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 13)
+
+# Criar uma lista com as células de cada cluster
+cells_to_highlight <- list(Cluster_0 = cells_cluster_0, Cluster_8 = cells_cluster_8, Cluster_13 = cells_cluster_13)
+
+# Plotar com cores diferentes para cada cluster
+p<-DimPlot(Objeto_Filtrado_TumorCells, cells.highlight = cells_to_highlight, cols.highlight = c("blue", "red",'orange'), cols = "gray")
+p<-p + ggtitle('Proximidade de clusters para identificação de populações Stem')
+
+
+
+
+
+##### Gráficos dos genes presentes no cluster 3 e população EMT. 
+#Os genes responsáveis pelos 44 counts UP são: 
+top20logFC<-head(Pop_emt_cluster3[order(Pop_emt_cluster3$log2FC_cluster,decreasing = T), ,drop=FALSE],20)
+lista_genes<-rownames(top20logFC[top20logFC$log2FC_consist=='1',])
+
+DotPlot(Objeto_Filtrado_TumorCells , features = lista_genes, cols='RdYlBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Top Genes comuns ao cluster 3 e População EMT')
+
+
+# Identificar as células dos clusters 3, 7 , 9 , 18 e 19 
+cells_cluster_3 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 3)
+cells_cluster_7 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 7)
+cells_cluster_9 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 9)
+
+
+# Criar uma lista com as células de cada cluster
+cells_to_highlight <- list(Cluster_3 = cells_cluster_3,Cluster_7 = cells_cluster_7, Cluster_9 = cells_cluster_9)
+
+# Plotar com cores diferentes para cada cluster
+p<-DimPlot(Objeto_Filtrado_TumorCells, cells.highlight = cells_to_highlight, cols.highlight = c("blue",'orange','red'), cols = "gray")
+p<-p + ggtitle('Proximidade de clusters para identificação de populações EMT')
+
+
+
+##### Gráficos dos genes presentes no cluster 6 e população Acinar. 
+#Os genes responsáveis pelos 10 counts UP são: 
+lista_genes<-rownames(Pop_acinar_cluster6[Pop_acinar_cluster6$log2FC_consist=='1',])
+
+DotPlot(Objeto_Filtrado_TumorCells , features = lista_genes, cols='RdYlBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Top Genes comuns ao cluster 6 e População Acinar')
+
+
+# Identificar as células dos clusters 3, 18 e 19
+cells_cluster_6 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 6)
+cells_cluster_18 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 18)
+cells_cluster_19 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 19)
+
+# Criar uma lista com as células de cada cluster
+cells_to_highlight <- list(Cluster_6 = cells_cluster_6,Cluster_18 = cells_cluster_18, Cluster_19 = cells_cluster_19)
+
+# Plotar com cores diferentes para cada cluster
+p<-DimPlot(Objeto_Filtrado_TumorCells, cells.highlight = cells_to_highlight, cols.highlight = c("blue",'orange','red'), cols = "gray")
+p<-p + ggtitle('Proximidade de clusters para identificação de populações Acinar')
+
+
+#gerar os top genes da população para tirar as teimas sobre o 18 e 19 (que não deverão ser acinar)
+
+TopAcinargenes<-acinar_data$gene.2[acinar_data$avg_logFC>1]
+DotPlot(Objeto_Filtrado_TumorCells , features = TopAcinargenes, cols='RdYlBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Tumor Cells | Top Log2FC Acinar genes')
+
+
+TopEmtgenes<-emt_data$gene.2[emt_data$avg_logFC>1]
+DotPlot(Objeto_Filtrado_TumorCells , features = TopEmtgenes, cols='RdYlBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Tumor Cells | Top Log2FC Emt genes')
+
+
+##### Gráficos dos genes presentes no cluster 7 e população IFN. 
+#Os genes responsáveis pelos 24 counts UP são: 
+lista_genes<-rownames(Pop_ifn_cluster7[Pop_ifn_cluster7$log2FC_consist=='1',])
+
+DotPlot(Objeto_Filtrado_TumorCells , features = lista_genes, cols='RdYlBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Top Genes comuns ao cluster 7 e População Ifn')
+
+
+#gerar os top genes da população para tirar as teimas sobre o 2 , 5 e 10
+
+TopIfngenes<-ifn_data$gene.2[ifn_data$avg_logFC>1]
+DotPlot(Objeto_Filtrado_TumorCells , features = TopIfngenes, cols='RdBu') + RotatedAxis() +xlab('Genes')+ ylab('Clusters')+ ggtitle('Tumor Cells | Top Log2FC Ifn genes')
+
+# Identificar as células dos clusters 7,8 e 20
+cells_cluster_2 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 2)
+cells_cluster_5 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 5)
+cells_cluster_7 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 7)
+cells_cluster_10 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 10)
+
+# Criar uma lista com as células de cada cluster
+cells_to_highlight <- list(Cluster_2 = cells_cluster_2,Cluster_5 = cells_cluster_5, Cluster_7 = cells_cluster_7,Cluster_10 = cells_cluster_10)
+
+# Plotar com cores diferentes para cada cluster
+p<-DimPlot(Objeto_Filtrado_TumorCells, cells.highlight = cells_to_highlight, cols.highlight = c("blue",'orange','red','green'), cols = "gray")
+p<-p + ggtitle('Proximidade de clusters para identificação de populações Ifn')
+
+
+
+```
+
+
+```{r}
+
+##### Gerar Dimplot com TODAS as populações ENCONTRADAS em células tumorais (2 tipos, um com clusters e outro com populações)
+
+#Dimplot para ver todos os clusters
+# Identificar as células dos clusters
+cells_cluster_0 <- WhichCells(Objeto_Filtrado_TumorCells, idents =0)
+cells_cluster_13 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 13)
+cells_cluster_3 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 3)
+cells_cluster_6 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 6)
+cells_cluster_7 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 7)
+
+
+# Criar uma lista com as células de cada cluster
+cells_to_highlight <- list(
+  Cluster_13 = cells_cluster_13,
+  Cluster_7 = cells_cluster_7,
+  Cluster_6 = cells_cluster_6,
+  Cluster_3 = cells_cluster_3,
+  Cluster_0 = cells_cluster_0
+)
+
+# Plotar com cores diferentes para cada cluster
+p<-DimPlot(Objeto_Filtrado_TumorCells, cells.highlight = cells_to_highlight, cols.highlight = c("red1",'green2','orange','blue','cyan'), cols = "gray")
+p<-p + ggtitle('Distribution of Tumor Human Cell Clusters')+ theme(plot.title = element_text(hjust = 0.5))+theme(legend.position = "right")
+
+
+
+
+#Dimplot para ver todas as populações
+# Identificar as células dos clusters
+# Identificar as células dos clusters
+cells_cluster_0 <- WhichCells(Objeto_Filtrado_TumorCells, idents =0)
+cells_cluster_13 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 13)
+cells_cluster_3 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 3)
+cells_cluster_6 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 6)
+cells_cluster_7 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 7)
+
+
+# Criar uma lista com as células de cada cluster
+cells_to_highlight <- list(Emt = cells_cluster_3, Stem = c(cells_cluster_0,cells_cluster_13),Ifn=cells_cluster_7,Acinar=cells_cluster_6)
+
+# Plotar com cores diferentes para cada cluster
+q<-DimPlot(Objeto_Filtrado_TumorCells, cells.highlight = cells_to_highlight, cols.highlight = c("blue2", "red1",'orange','cyan'), cols = "gray")
+q<-q + ggtitle('Populations found in Tumor Human Cells')+ theme(plot.title = element_text(hjust = 0.5))
+
+
+p+q
+
+
+
+### Distinguir Basal de Classical (Apenas pelos vermelhos do heatmap e não por exclusão de partes)
+
+
+#Dimplot para ver todos os clusters
+# Identificar as células dos clusters
+cells_cluster_0 <- WhichCells(Objeto_Filtrado_TumorCells, idents =0)
+cells_cluster_1 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 1)
+cells_cluster_13 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 13)
+cells_cluster_8 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 8)
+cells_cluster_14 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 14)
+cells_cluster_3 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 3)
+cells_cluster_7 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 7)
+cells_cluster_9 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 9)
+
+
+# Criar uma lista com as células de cada cluster
+cells_to_highlight <- list(Cluster_0 = cells_cluster_0, Cluster_1 = cells_cluster_1, Cluster_13 = cells_cluster_13,Cluster_8 = cells_cluster_8, Cluster_14 = cells_cluster_14,Cluster_3 = cells_cluster_3, Cluster_7 = cells_cluster_7, Cluster_9 = cells_cluster_9)
+
+# Plotar com cores diferentes para cada cluster
+p<-DimPlot(Objeto_Filtrado_TumorCells, cells.highlight = cells_to_highlight, cols.highlight = c("red1",'green2','orange','blue','cyan','yellow3','purple','brown4'), cols = "gray")
+p<-p + ggtitle('Proximidade de clusters em tumor cells')
+
+
+
+#Dimplot para ver todas as populações
+
+# Identificar as células dos clusters
+cells_cluster_0 <- WhichCells(Objeto_Filtrado_TumorCells, idents =0)
+cells_cluster_1 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 1)
+cells_cluster_13 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 13)
+cells_cluster_8 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 8)
+cells_cluster_14 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 14)
+cells_cluster_3 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 3)
+cells_cluster_7 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 7)
+cells_cluster_9 <- WhichCells(Objeto_Filtrado_TumorCells, idents = 9)
+
+
+
+# Criar uma lista com as células de cada cluster
+cells_to_highlight <- list(Classical_Subtype = c(cells_cluster_0,cells_cluster_1,cells_cluster_13,cells_cluster_8), Basal_Subtype =c(cells_cluster_3,cells_cluster_7,cells_cluster_9,cells_cluster_14))
+
+# Plotar com cores diferentes para cada cluster
+q<-DimPlot(Objeto_Filtrado_TumorCells, cells.highlight = cells_to_highlight, cols.highlight = c("blue2",'orange'), cols = "gray")
+q<-q + ggtitle('Subtypes found in Tumor Human Cells')+ theme(plot.title = element_text(hjust = 0.5))
+
+p+q
+
+```
+
+#Depois de ter conseguido tirar conclusões a respeito das células tumorais na perspetiva dos pacientes (anotadas no documento "Observações relativamente aos biomarkers"), vou agora realizar o mesmo mas para células normais.Ia realizar para normal cells o hamorny para pacientes, mas como as células são todas do mesmo, não há alteração dos resultados em relação ao que já tinha anteriormente. Por isso, yh está feita essa parte :) 
+
+#Vamos então ver a sugestão da Ana. Ver como se comporta o tumor de um paciente que tem uma certa proporção de populações. Para isso tenho de fazer uns stacked bar plots em que temos a percentagem de cada população que encontramos.
+
+#Para isso primeiramente vou adicionar ao objeto seurat (de tumor cells harmonizadas para orig.ident e SampleID) uma coluna nova à meta data em que vou ter a que população corresponde cada cluster. Os clusters que não correspondem a nenhuma população serão "undefined".
+
+
+```{r}
+
+rm(list = ls()) #remove as variáveis guardadas
+
+library(Seurat)
+library(SeuratData)
+library(ggplot2)
+library(patchwork)
+
+#Abrir o objeto filtrado de Células Tumorais Harmony Pacientes
+
+Objeto_Filtrado_TumorCells <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Tumorcells\\Objeto_filtrado_Harmony_Pacientes.rds")
+
+#criar uma nova coluna na meta data que diz vazio em todas as linhas
+Objeto_Filtrado_TumorCells@meta.data$Population<-rep('vazio',length(Objeto_Filtrado_TumorCells@meta.data$orig.ident))
+
+#criar as listas de populações com os clusters correspondentes
+
+acinar_pop<- c ('6')
+stem_pop<- c('0', '13')
+ifn_pop<- c('7')
+emt_pop<- c('3')
+  
+lista_populacoes<-list('acinar'=acinar_pop,'stem'=stem_pop,'ifn'=ifn_pop,'emt'=emt_pop)
+
+for ( i in 1:length(Objeto_Filtrado_TumorCells@meta.data$Population)){
+  for (j in 1:length(lista_populacoes)){
+     if (Objeto_Filtrado_TumorCells@meta.data$seurat_clusters[i] %in% lista_populacoes[[j]]){
+       Objeto_Filtrado_TumorCells@meta.data$Population[i]<-names(lista_populacoes[j])
+     }
+  }
+  if (Objeto_Filtrado_TumorCells@meta.data$Population[i]=='vazio'){
+    Objeto_Filtrado_TumorCells@meta.data$Population[i]<-'undefined'
+  }
+}
+
+# Carregar as bibliotecas necessárias
+library(ggplot2)
+
+# Criar uma tabela com a contagem de células por SampleID e Population
+tabela_contagem <- table(Objeto_Filtrado_TumorCells@meta.data$SampleID, 
+                         Objeto_Filtrado_TumorCells@meta.data$Population)
+
+# Converter a tabela para um data frame
+df <- data.frame(tabela_contagem) #basicamente cada combinação passa a estar na coluna do df , criando 3 colunas.
+
+# Renomear as colunas para algo mais claro
+colnames(df) <- c("SampleID", "Population", "Count") 
+
+# Calcular a percentagem de cada população dentro de cada SampleID
+total_por_sample <- tapply(df$Count, df$SampleID, sum)  # Soma o total de células por SampleID. Basicamente tem-se tapply(vetor, índice, FUNÇÃO) e o tapply aplica a operação que indicarmos no terceiro argumento ao vetor do primeiro argumento agrupando os valores pelo segundo argumento. Neste caso temos o somatório de células por doente.
+
+
+df$Percentage <- (df$Count / total_por_sample[df$SampleID]) * 100  # Calcula a percentagem
+
+# Criar o gráfico de barras empilhadas
+ggplot(df, aes(x = SampleID, y = Percentage, fill = Population)) +
+  geom_bar(stat = "identity", position = "stack") +  # Barras empilhadas. Usando "identity", estamos dizendo que a altura de cada barra será dada diretamente pela variável Percentage
+  labs(title = "Distribuição de Populações por Amostra",
+       x = "SampleID",
+       y = "Percentagem (%)",
+       fill = "População") + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotacionar os nomes das amostras
+
+```
+#Com isto o objetivo foi tentar perceber um padrão. Verificou-se que é raro apresentar ifn e acinar cells de forma geral entre doentes.
+
+#Vou agora realizar a análise de clustering é usada em muitos contextos para agrupar Amostras. A clustering tree é diferente na medida em que visualiza as relações entre um intervalo de resoluções. Vamos fazer varios clusters e ver quais é que fazem mais sentido, daí usarmos uma lista com várias resoluções.
+
+```{r}
+
+library(Seurat)
+library(SeuratData)
+library(ggplot2)
+library(patchwork)
+library(clustree)
+
+#Abrir o objeto filtrado de Células Tumorais Harmony Pacientes
+
+Objeto_Filtrado_TumorCells <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Tumorcells\\Objeto_filtrado_Harmony_Pacientes.rds")
+
+
+CAFs <- FindClusters(Objeto_Filtrado_TumorCells, verbose = TRUE, resolution = c(0, 0.1, 0.2, 0.3, 0.4, 0.5,0.6,0.7,0.8,0.9,1))
+
+clustree(CAFs)
+```
+
+
+
+
+
+#Vou agora fazer o dimplots da proporção de células que estão a expressar genes mitocondriais em células normais e perceber a sua distribuição no Dimplot.
+
+```{r}
+rm(list = ls()) #remove as variáveis guardadas
+
+#Abrir o objeto seurat de células normais. (a contar como se fosse de pacientes, porque só existe 1)
+
+Objeto_Filtrado_NormalCells <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_Normalcells\\objeto_filtrado_NormalC_UMAP_30PCs_Harmony.rds")
+
+#Realizar o Dimplot para observar a expressão de genes mitocondriais
+FeaturePlot(Objeto_Filtrado_NormalCells, features = "percent.mt",cols = c("lightgrey", "blue"))
+
+```
+#Como não há grande diferença nas mitocondriais, vou testar agora para ribossomais
+
+
+```{r}
+#Calcular a percentagem de ribossomas em células normais
+
+Objeto_Filtrado_NormalCells[["percent.rb"]] <- PercentageFeatureSet(Objeto_Filtrado_NormalCells, pattern = "^RP[SL]")
+
+#Realizar o Dimplot para observar a expressão de genes ribossomais
+FeaturePlot(Objeto_Filtrado_NormalCells, features = "percent.rb",cols = c("lightgrey", "red2"))
+
+
+
+
+```
+
+
+#Também não deu nada :´)
+#Então, o seurat tem uma lista de genes associados ao cell cycle "cc.genes.updated.2019" e com isto podemos perceber se as células estão em fase S, G1 ou G2M. A ideia é a mesma que com os genes mt/rb, será que esses clusters afastados estão nalguma fase em especifico do ciclo celular?
+
+
+```{r}
+
+s.genes <- cc.genes.updated.2019$s.genes #fase S
+g2m.genes <- cc.genes.updated.2019$g2m.genes #fase G2 e Mitose
+
+Objeto_Filtrado_NormalCells <- CellCycleScoring(Objeto_Filtrado_NormalCells, s.features = s.genes, g2m.features = g2m.genes)
+table(Objeto_Filtrado_NormalCells[[]]$Phase)
+
+FeaturePlot(Objeto_Filtrado_NormalCells,features = c("S.Score","G2M.Score"),cols = c("lightgrey", "red2"))
+
+```
+#Não deu nada, é tudo G1 :´)
+
+
+#Enquanto estava a escrever o artigo reparei que não gerei o gráfico antes de depois do harmony para TODAS as células.
+```{r}
+
+library(dplyr)
+library(Seurat)
+library(patchwork)
+
+#Abrir o objeto filtrado (em sessões futuras)
+Objeto_Filtrado <- readRDS("C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_3grupos\\objeto_filtrado_UMAP.rds")
+
+
+library(harmony)
+
+# Realiza o Harmony num novo objeto para não influenciar o código anterior (caso queira revê-lo posteriormente, pois o resultado do UMAP irá variar no código posterior )
+
+Objeto_Filtrado_Harmony<-RunHarmony(Objeto_Filtrado, group.by.vars = c('orig.ident','SampleID'), plot_convergence=FALSE)
+
+#Realizar o UMAP e clustering usando os embeddings (outputs) do Harmony em vez do PCA (os PC's)
+ 
+Objeto_Filtrado_Harmony<- Objeto_Filtrado_Harmony %>%
+  RunUMAP(reduction='harmony',dims=1:30)%>%
+  FindNeighbors(reduction='harmony', dims=1:30)%>%
+  FindClusters(resolution=0.5)
+
+# Guardar o objeto para otimizar o trabalho
+saveRDS(Objeto_Filtrado_Harmony,'C:\\Users\\fmmar\\OneDrive\\Ambiente de Trabalho\\Universidade\\3º Ano\\Projeto LBCM\\data\\Objeto_filtrado_3grupos\\objeto_filtrado_Pacientes_Harmony_3grupos.rds')
+
+library(ggplot2)
+#este faz o 6 gráficos
+q1<-DimPlot(Objeto_Filtrado, reduction = "umap", group.by='group')
+q1<-q1 + ggtitle('Before Harmony | Groups')
+q2<- DimPlot(Objeto_Filtrado, reduction = "umap", group.by='orig.ident')
+q2<-q2 + ggtitle('Before Harmony | Papers')
+q3<-DimPlot(Objeto_Filtrado_Harmony, reduction = "umap", group.by='group')
+q3<-q3 + ggtitle('After Harmony | Groups')
+q4<-DimPlot(Objeto_Filtrado_Harmony, reduction = "umap", group.by='orig.ident')
+q4<-q4 + ggtitle('After Harmony | Papers')
+q5<-DimPlot(Objeto_Filtrado, reduction='umap')
+q5<-q5 + ggtitle('Before Harmony | Clusters')
+q6<-DimPlot(Objeto_Filtrado_Harmony, reduction='umap')
+q6<-q6 + ggtitle('After Harmony | Clusters')
+
+q1+q2+q5+q3+q4+q6
+
+
+
+```
+
+
+
+
+THE END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
